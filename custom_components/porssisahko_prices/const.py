@@ -1,0 +1,9 @@
+DOMAIN = "porssisahko_prices"
+DEFAULT_NAME = "Porssisahko Prices"
+DEFAULT_SCAN_INTERVAL_MINUTES = 60
+DEFAULT_VAT = 24.0
+DEFAULT_DAY_TRANSFER = 0.0
+DEFAULT_NIGHT_TRANSFER = 0.0
+DEFAULT_GAS_EXCISE = 0.0
+ELERING_URL = "https://dashboard.elering.ee/api/nps/price/csv"
+EEX_URL = "https://gasandregistry.eex.com/Gas/NGP/LVA-EST_NGP_15_Mins.csv"

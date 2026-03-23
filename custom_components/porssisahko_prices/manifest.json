@@ -1,0 +1,11 @@
+{
+  "domain": "porssisahko_prices",
+  "name": "Porssisahko Prices",
+  "version": "0.1.0",
+  "documentation": "https://github.com/peetervalk/shelly-price-optimizer",
+  "requirements": [],
+  "codeowners": [
+    "@peetervalk"
+  ],
+  "iot_class": "cloud_polling"
+}
