@@ -1,5 +1,5 @@
-DOMAIN = "porssisahko_prices"
-DEFAULT_NAME = "Porssisahko Prices"
+DOMAIN = "ha_nordpool_gas"
+DEFAULT_NAME = "Spot Price"
 DEFAULT_SCAN_INTERVAL_MINUTES = 60
 DEFAULT_VAT = 24.0
 DEFAULT_DAY_TRANSFER = 0.0

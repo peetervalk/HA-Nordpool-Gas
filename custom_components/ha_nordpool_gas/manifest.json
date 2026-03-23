@@ -1,6 +1,6 @@
 {
-  "domain": "porssisahko_prices",
-  "name": "Porssisahko Prices",
+  "domain": "ha_nordpool_gas",
+  "name": "Spot Price",
   "version": "0.1.0",
   "documentation": "https://github.com/peetervalk/shelly-price-optimizer",
   "requirements": [],

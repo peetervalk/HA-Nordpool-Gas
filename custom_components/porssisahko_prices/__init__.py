@@ -1,1 +1,0 @@
-"""Porssisahko price provider integration."""

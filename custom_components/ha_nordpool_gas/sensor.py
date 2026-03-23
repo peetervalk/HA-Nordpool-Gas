@@ -158,11 +158,11 @@ async def async_setup_platform(
     await coordinator.async_refresh()
 
     async_add_entities(
-        [PorssisahkoPriceSensor(coordinator, name, description) for description in SENSORS]
+        [SpotPriceSensor(coordinator, name, description) for description in SENSORS]
     )
 
 
-class PorssisahkoPriceSensor(CoordinatorEntity, SensorEntity):
+class SpotPriceSensor(CoordinatorEntity, SensorEntity):
     _attr_native_unit_of_measurement = "c/kWh"
 
     def __init__(
