@@ -1,27 +1,32 @@
 from __future__ import annotations
 
+import asyncio
 import csv
 import io
 import logging
+from collections import defaultdict
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
+from urllib.parse import urlencode, urlparse, urlunparse
 
 import voluptuous as vol
 
 from homeassistant.components.sensor import SensorEntity
 from homeassistant.const import CONF_NAME
 from homeassistant.core import HomeAssistant
+import homeassistant.util.dt as dt_util
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.event import async_track_time_change
 from homeassistant.helpers.update_coordinator import CoordinatorEntity, DataUpdateCoordinator
 
 from .const import (
+    DEFAULT_AREA,
     DEFAULT_DAY_TRANSFER,
     DEFAULT_GAS_EXCISE,
     DEFAULT_NAME,
     DEFAULT_NIGHT_TRANSFER,
-    DEFAULT_SCAN_INTERVAL_MINUTES,
     DEFAULT_VAT,
     DOMAIN,
     EEX_URL,
@@ -30,18 +35,20 @@ from .const import (
 
 CONF_ELECTRICITY_URL = "electricity_url"
 CONF_GAS_URL = "gas_url"
-CONF_SCAN_INTERVAL = "scan_interval_minutes"
+CONF_AREA = "area"
 CONF_VAT = "vat"
 CONF_DAY_TRANSFER = "day_transfer"
 CONF_NIGHT_TRANSFER = "night_transfer"
 CONF_GAS_EXCISE = "gas_excise"
+
+_AREAS = ["ee", "fi", "lt", "lv"]
 
 PLATFORM_SCHEMA = cv.PLATFORM_SCHEMA.extend(
     {
         vol.Optional(CONF_NAME, default=DEFAULT_NAME): cv.string,
         vol.Optional(CONF_ELECTRICITY_URL, default=ELERING_URL): cv.string,
         vol.Optional(CONF_GAS_URL, default=EEX_URL): cv.string,
-        vol.Optional(CONF_SCAN_INTERVAL, default=DEFAULT_SCAN_INTERVAL_MINUTES): cv.positive_int,
+        vol.Optional(CONF_AREA, default=DEFAULT_AREA): vol.In(_AREAS),
         vol.Optional(CONF_VAT, default=DEFAULT_VAT): vol.Coerce(float),
         vol.Optional(CONF_DAY_TRANSFER, default=DEFAULT_DAY_TRANSFER): vol.Coerce(float),
         vol.Optional(CONF_NIGHT_TRANSFER, default=DEFAULT_NIGHT_TRANSFER): vol.Coerce(float),
@@ -51,6 +58,7 @@ PLATFORM_SCHEMA = cv.PLATFORM_SCHEMA.extend(
 
 _LOGGER = logging.getLogger(__name__)
 
+
 @dataclass(frozen=True)
 class PriceSensorDescription:
     key: str
@@ -59,11 +67,96 @@ class PriceSensorDescription:
 
 
 SENSORS = (
-    PriceSensorDescription("electricity_now", "Electricity Price Now", "electricity_now"),
-    PriceSensorDescription("gas_now", "Gas Price Now", "gas_now"),
-    PriceSensorDescription("electricity_avg", "Electricity Price Average", "electricity_avg"),
-    PriceSensorDescription("gas_avg", "Gas Price Average", "gas_avg"),
+    PriceSensorDescription("electricity_15min", "Electricity Price 15min", "electricity_15min"),
+    PriceSensorDescription("electricity_hourly", "Electricity Price Hourly", "electricity_hourly"),
+    PriceSensorDescription("gas_now", "Gas Price", "gas_now"),
 )
+
+
+def _build_elering_url(base_url: str, area: str, today: date, tomorrow: date) -> str:
+    """Append date range and area field params to the Elering CSV base URL."""
+    parsed = urlparse(base_url)
+    query = urlencode({"start": f"{today}T00:00:00Z", "end": f"{tomorrow}T23:59:59Z", "fields": area})
+    return urlunparse(parsed._replace(query=query))
+
+
+def _parse_electricity_csv(
+    text: str,
+    vat: float,
+    day_transfer: float,
+    night_transfer: float,
+    today: date,
+    tomorrow: date,
+) -> tuple[list[tuple[datetime, float]], list[tuple[datetime, float]]]:
+    """Parse Elering CSV (semicolon-delimited), return (today_rows, tomorrow_rows).
+
+    Columns: 'Ajatempel (UTC)' (Unix epoch UTC), 'Kuupäev (Eesti aeg)' (local datetime string),
+    and a price column whose name varies by area (e.g. 'NPS Eesti') — always the last column.
+    Prices are in EUR/MWh with comma as the decimal separator.
+    Timestamps are converted from UTC epoch to local system time.
+    """
+    today_rows: list[tuple[datetime, float]] = []
+    tomorrow_rows: list[tuple[datetime, float]] = []
+    reader = csv.DictReader(io.StringIO(text), delimiter=";")
+    price_col = reader.fieldnames[-1] if reader.fieldnames else None
+    if not price_col:
+        return today_rows, tomorrow_rows
+    for row in reader:
+        try:
+            dt = datetime.fromtimestamp(int(row["Ajatempel (UTC)"]))
+            price_eur_mwh = float(row[price_col].replace(",", "."))
+        except (KeyError, ValueError, TypeError, OSError):
+            continue
+        row_date = dt.date()
+        if row_date not in (today, tomorrow):
+            continue
+        price_c_kwh = (price_eur_mwh / 10) * (100 + vat) / 100
+        if 7 <= dt.hour < 22:
+            price_c_kwh += day_transfer
+        else:
+            price_c_kwh += night_transfer
+        item = (dt, round(price_c_kwh, 2))
+        if row_date == today:
+            today_rows.append(item)
+        else:
+            tomorrow_rows.append(item)
+    return today_rows, tomorrow_rows
+
+
+def _build_hourly_averages(rows: list[tuple[datetime, float]]) -> dict[int, float]:
+    """Return {hour: avg_price} calculated from the 15-min row tuples."""
+    groups: dict[int, list[float]] = defaultdict(list)
+    for dt, price in rows:
+        groups[dt.hour].append(price)
+    return {hour: round(sum(prices) / len(prices), 2) for hour, prices in groups.items()}
+
+
+def _parse_gas_csv(
+    text: str, today_str: str, tomorrow_str: str
+) -> tuple[float | None, float | None]:
+    """Parse EEX CSV and return (today_price, tomorrow_price) in EUR/MWh."""
+    today_price: float | None = None
+    tomorrow_price: float | None = None
+    for row in csv.DictReader(io.StringIO(text), delimiter=";"):
+        row_date = row.get("Date", "").strip()
+        if row_date not in (today_str, tomorrow_str):
+            continue
+        try:
+            price = float(str(row.get("Price", "0")).replace(",", "."))
+        except (ValueError, TypeError):
+            continue
+        if row_date == today_str and today_price is None:
+            today_price = price
+        elif row_date == tomorrow_str and tomorrow_price is None:
+            tomorrow_price = price
+        if today_price is not None and tomorrow_price is not None:
+            break
+    return today_price, tomorrow_price
+
+
+def _rows_to_list(rows: list[tuple[datetime, float]]) -> list[list]:
+    """Convert (datetime, price) tuples to serialisable [timestamp, price] lists."""
+    return [[int(dt.timestamp()), price] for dt, price in rows]
 
 
 async def async_setup_platform(
@@ -75,7 +168,7 @@ async def async_setup_platform(
     name = config[CONF_NAME]
     electricity_url = config[CONF_ELECTRICITY_URL]
     gas_url = config[CONF_GAS_URL]
-    scan_interval_minutes = config[CONF_SCAN_INTERVAL]
+    area = config[CONF_AREA]
     vat = config[CONF_VAT]
     day_transfer = config[CONF_DAY_TRANSFER]
     night_transfer = config[CONF_NIGHT_TRANSFER]
@@ -83,67 +176,77 @@ async def async_setup_platform(
 
     session = async_get_clientsession(hass)
 
+    async def _fetch(url: str) -> str:
+        try:
+            resp = await session.get(url, timeout=30)
+            resp.raise_for_status()
+            return await resp.text()
+        except Exception as err:
+            _LOGGER.error("Error fetching %s: %s", url, err)
+            return ""
+
     async def _async_update_data():
-        now = datetime.now()
-        electricity_hourly = []
-        gas_hourly = []
+        now = dt_util.now()
+        now_naive = now.replace(tzinfo=None)
+        today = now_naive.date()
+        tomorrow = today + timedelta(days=1)
+        today_str = now_naive.strftime("%d/%m/%Y")
+        tomorrow_str = (now_naive + timedelta(days=1)).strftime("%d/%m/%Y")
 
-        electricity_resp = await session.get(electricity_url, timeout=30)
-        electricity_resp.raise_for_status()
-        electricity_text = await electricity_resp.text()
+        elering_url = _build_elering_url(electricity_url, area, today, tomorrow)
 
-        for row in csv.DictReader(io.StringIO(electricity_text)):
-            try:
-                price_eur_mwh = float(row.get("Price", 0))
-                dt = datetime.strptime(row.get("Timestamp", ""), "%Y-%m-%d %H:%M:%S")
-            except (ValueError, TypeError):
-                continue
+        electricity_text, gas_text = await asyncio.gather(
+            _fetch(elering_url),
+            _fetch(gas_url),
+        )
 
-            price_c_kwh = (price_eur_mwh / 10) * (100 + vat) / 100
-            if 7 <= dt.hour < 22:
-                price_c_kwh += day_transfer
-            else:
-                price_c_kwh += night_transfer
-            electricity_hourly.append([int(dt.timestamp()), round(price_c_kwh, 2)])
+        (today_elec_rows, tomorrow_elec_rows), (gas_today_raw, gas_tomorrow_raw) = (
+            await asyncio.gather(
+                hass.async_add_executor_job(
+                    _parse_electricity_csv,
+                    electricity_text,
+                    vat,
+                    day_transfer,
+                    night_transfer,
+                    today,
+                    tomorrow,
+                ),
+                hass.async_add_executor_job(_parse_gas_csv, gas_text, today_str, tomorrow_str),
+            )
+        )
 
-        gas_resp = await session.get(gas_url, timeout=30)
-        gas_resp.raise_for_status()
-        gas_text = await gas_resp.text()
+        hourly_today, hourly_tomorrow = await asyncio.gather(
+            hass.async_add_executor_job(_build_hourly_averages, today_elec_rows),
+            hass.async_add_executor_job(_build_hourly_averages, tomorrow_elec_rows),
+        )
 
-        target_date = now.strftime("%d/%m/%Y")
-        gas_price = None
-        for row in csv.DictReader(io.StringIO(gas_text), delimiter=";"):
-            if row.get("Date", "").strip() != target_date:
-                continue
-            try:
-                gas_price = float(str(row.get("Price", "0")).replace(",", "."))
-                break
-            except (ValueError, TypeError):
-                continue
+        block_minute = (now_naive.minute // 15) * 15
+        electricity_15min = next(
+            (
+                price
+                for dt, price in today_elec_rows
+                if dt.hour == now_naive.hour and dt.minute == block_minute
+            ),
+            None,
+        )
 
-        if gas_price is not None:
-            gas_c_kwh = round(((gas_price / 10) * (100 + vat) / 100) + gas_excise, 2)
-            day_start = datetime(now.year, now.month, now.day)
-            for hour in range(24):
-                ts = int((day_start + timedelta(hours=hour)).timestamp())
-                gas_hourly.append([ts, gas_c_kwh])
+        electricity_hourly = hourly_today.get(now_naive.hour)
 
-        current_hour = int(now.replace(minute=0, second=0, microsecond=0).timestamp())
-        electricity_now = next((p[1] for p in electricity_hourly if p[0] == current_hour), None)
-        gas_now = next((p[1] for p in gas_hourly if p[0] == current_hour), None)
-
-        electricity_values = [p[1] for p in electricity_hourly]
-        gas_values = [p[1] for p in gas_hourly]
+        def _to_gas_price(raw: float | None) -> float | None:
+            if raw is None:
+                return None
+            return round(((raw / 10) * (100 + vat) / 100) + gas_excise, 2)
 
         return {
+            "electricity_15min": electricity_15min,
             "electricity_hourly": electricity_hourly,
-            "gas_hourly": gas_hourly,
-            "electricity_now": electricity_now,
-            "gas_now": gas_now,
-            "electricity_avg": round(sum(electricity_values) / len(electricity_values), 2)
-            if electricity_values
-            else None,
-            "gas_avg": round(sum(gas_values) / len(gas_values), 2) if gas_values else None,
+            "gas_now": _to_gas_price(gas_today_raw),
+            "gas_tomorrow": _to_gas_price(gas_tomorrow_raw),
+            "electricity_rows_today": _rows_to_list(today_elec_rows),
+            "electricity_rows_tomorrow": _rows_to_list(tomorrow_elec_rows),
+            "hourly_today": hourly_today,
+            "hourly_tomorrow": hourly_tomorrow,
+            "tomorrow_valid": len(tomorrow_elec_rows) > 0,
             "updated_at": int(now.timestamp()),
         }
 
@@ -151,9 +254,20 @@ async def async_setup_platform(
         hass,
         logger=_LOGGER,
         name=f"{DOMAIN}_{name}",
-        update_interval=timedelta(minutes=scan_interval_minutes),
+        update_interval=None,
         update_method=_async_update_data,
     )
+
+    async def _handle_time_update(_now=None):
+        await coordinator.async_request_refresh()
+
+    cancel_quarterly = async_track_time_change(
+        hass, _handle_time_update, minute=[0, 15, 30, 45], second=5
+    )
+    cancel_new_prices = async_track_time_change(
+        hass, _handle_time_update, hour=16, minute=0, second=5
+    )
+    hass.data.setdefault(DOMAIN, []).extend([cancel_quarterly, cancel_new_prices])
 
     await coordinator.async_refresh()
 
@@ -164,6 +278,14 @@ async def async_setup_platform(
 
 class SpotPriceSensor(CoordinatorEntity, SensorEntity):
     _attr_native_unit_of_measurement = "c/kWh"
+    _unrecorded_attributes = frozenset(
+        {
+            "electricity_rows_today",
+            "electricity_rows_tomorrow",
+            "hourly_today",
+            "hourly_tomorrow",
+        }
+    )
 
     def __init__(
         self,
@@ -182,8 +304,14 @@ class SpotPriceSensor(CoordinatorEntity, SensorEntity):
 
     @property
     def extra_state_attributes(self):
-        return {
-            "updated_at": self.coordinator.data.get("updated_at"),
-            "electricity_hourly": self.coordinator.data.get("electricity_hourly"),
-            "gas_hourly": self.coordinator.data.get("gas_hourly"),
-        }
+        data = self.coordinator.data
+        attrs = {"updated_at": data.get("updated_at")}
+        if self._description.key == "electricity_15min":
+            attrs["electricity_rows_today"] = data.get("electricity_rows_today")
+            attrs["electricity_rows_tomorrow"] = data.get("electricity_rows_tomorrow")
+            attrs["hourly_today"] = data.get("hourly_today")
+            attrs["hourly_tomorrow"] = data.get("hourly_tomorrow")
+            attrs["tomorrow_valid"] = data.get("tomorrow_valid")
+        elif self._description.key == "gas_now":
+            attrs["gas_tomorrow"] = data.get("gas_tomorrow")
+        return attrs
