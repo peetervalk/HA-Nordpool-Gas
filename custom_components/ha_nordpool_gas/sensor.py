@@ -177,9 +177,9 @@ async def async_setup_platform(
 
     session = async_get_clientsession(hass)
 
-    async def _fetch(url: str) -> str:
+    async def _fetch(url: str, verify_ssl: bool = True) -> str:
         try:
-            resp = await session.get(url, timeout=30)
+            resp = await session.get(url, timeout=30, ssl=None if verify_ssl else False)
             resp.raise_for_status()
             return await resp.text()
         except Exception as err:
@@ -198,7 +198,7 @@ async def async_setup_platform(
 
         electricity_text, gas_text = await asyncio.gather(
             _fetch(elering_url),
-            _fetch(gas_url),
+            _fetch(gas_url, verify_ssl=False),
         )
 
         (today_elec_rows, tomorrow_elec_rows), (gas_today_raw, gas_tomorrow_raw) = (
