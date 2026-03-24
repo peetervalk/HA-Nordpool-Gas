@@ -110,12 +110,13 @@ def _parse_electricity_csv(
         row_date = dt.date()
         if row_date not in (today, tomorrow):
             continue
-        price_c_kwh = (price_eur_mwh / 10) * (100 + vat) / 100
-        if 7 <= dt.hour < 22:
-            price_c_kwh += day_transfer
+        price_final = price_eur_mwh * (100 + vat) / 100
+        is_night_transfer = dt.hour >= 22 or dt.hour < 7 or dt.weekday() in (5, 6)
+        if is_night_transfer:
+            price_final += night_transfer
         else:
-            price_c_kwh += night_transfer
-        item = (dt, round(price_c_kwh, 2))
+            price_final += day_transfer
+        item = (dt, round(price_final, 2))
         if row_date == today:
             today_rows.append(item)
         else:
@@ -235,7 +236,7 @@ async def async_setup_platform(
         def _to_gas_price(raw: float | None) -> float | None:
             if raw is None:
                 return None
-            return round(((raw / 10) * (100 + vat) / 100) + gas_excise, 2)
+            return round((raw * (100 + vat) / 100) + gas_excise, 2)
 
         return {
             "electricity_15min": electricity_15min,
@@ -277,7 +278,7 @@ async def async_setup_platform(
 
 
 class SpotPriceSensor(CoordinatorEntity, SensorEntity):
-    _attr_native_unit_of_measurement = "c/kWh"
+    _attr_native_unit_of_measurement = "EUR/MWh"
     _unrecorded_attributes = frozenset(
         {
             "electricity_rows_today",

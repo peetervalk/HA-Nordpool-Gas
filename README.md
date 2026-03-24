@@ -10,9 +10,9 @@ Both today's and tomorrow's prices are fetched on every update. Tomorrow's elect
 
 | Entity | State | Extra attributes |
 |---|---|---|
-| `Electricity Price 15min` | Current 15-min slot price (c/kWh) | `electricity_rows_today`, `electricity_rows_tomorrow`, `hourly_today`, `hourly_tomorrow`, `tomorrow_valid`, `updated_at` |
-| `Electricity Price Hourly` | Average of today's four 15-min prices for the current hour (c/kWh) | `updated_at` |
-| `Gas Price` | Today's gas price (c/kWh) | `gas_tomorrow`, `updated_at` |
+| `Electricity Price 15min` | Current 15-min slot price (EUR/MWh) | `electricity_rows_today`, `electricity_rows_tomorrow`, `hourly_today`, `hourly_tomorrow`, `tomorrow_valid`, `updated_at` |
+| `Electricity Price Hourly` | Average of today's four 15-min prices for the current hour (EUR/MWh) | `updated_at` |
+| `Gas Price` | Today's gas price (EUR/MWh) | `gas_tomorrow`, `updated_at` |
 
 Prices include VAT and optional transfer fees. Entities update at **:00, :15, :30 and :45** each hour.
 
@@ -21,7 +21,7 @@ Prices include VAT and optional transfer fees. Entities update at **:00, :15, :3
 ### HACS (recommended)
 
 1. In Home Assistant go to **HACS → Integrations → ⋮ → Custom repositories**
-2. Add `https://github.com/peetervalk/shelly-price-optimizer` as category **Integration**
+2. Add `https://github.com/peetervalk/HA-Nordpool-Gas` as category **Integration**
 3. Search for **Spot Price** and install it
 4. Restart Home Assistant
 
@@ -46,11 +46,12 @@ sensor:
     name: "Spot Price"         # Entity name prefix
     area: "ee"                 # NPS area: ee, fi, lt, lv (default: ee)
     vat: 24.0                  # VAT percentage (default: 24.0)
-    day_transfer: 0.0          # Day tariff added to electricity price c/kWh (default: 0.0)
-                               # Applied 07:00–22:00
-    night_transfer: 0.0        # Night tariff added to electricity price c/kWh (default: 0.0)
-                               # Applied 22:00–07:00
-    gas_excise: 0.0            # Fixed excise added to gas price c/kWh (default: 0.0)
+    day_transfer: 0.0          # Day tariff added to electricity price EUR/MWh (default: 0.0)
+                               # Applied on weekdays 07:00–22:00
+    night_transfer: 0.0        # Night tariff added to electricity price EUR/MWh (default: 0.0)
+                               # Applied 22:00–07:00 and weekends
+                               # (from Friday 22:00 to Monday 07:00)
+    gas_excise: 0.0            # Fixed excise added to gas price EUR/MWh (default: 0.0)
 ```
 
 ### Options
@@ -60,6 +61,6 @@ sensor:
 | `name` | `Spot Price` | Prefix for all entity names |
 | `area` | `ee` | NPS price area — `ee`, `fi`, `lt` or `lv` |
 | `vat` | `24.0` | VAT % applied to both electricity and gas |
-| `day_transfer` | `0.0` | Transfer fee added to electricity during 07:00–22:00 (c/kWh) |
-| `night_transfer` | `0.0` | Transfer fee added to electricity during 22:00–07:00 (c/kWh) |
-| `gas_excise` | `0.0` | Fixed fee added to gas price (c/kWh) |
+| `day_transfer` | `0.0` | Transfer fee added to electricity on weekdays during 07:00–22:00 (EUR/MWh) |
+| `night_transfer` | `0.0` | Transfer fee added to electricity during 22:00–07:00 and weekends (Friday 22:00 to Monday 07:00) (EUR/MWh) |
+| `gas_excise` | `0.0` | Fixed fee added to gas price (EUR/MWh) |
