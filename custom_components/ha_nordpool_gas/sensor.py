@@ -87,6 +87,7 @@ def _parse_electricity_csv(
     night_transfer: float,
     today: date,
     tomorrow: date,
+    utc_offset: timedelta,
 ) -> tuple[list[tuple[datetime, float]], list[tuple[datetime, float]]]:
     """Parse Elering CSV (semicolon-delimited), return (today_rows, tomorrow_rows).
 
@@ -103,7 +104,7 @@ def _parse_electricity_csv(
         return today_rows, tomorrow_rows
     for row in reader:
         try:
-            dt = datetime.fromtimestamp(int(row["Ajatempel (UTC)"]))
+            dt = datetime.utcfromtimestamp(int(row["Ajatempel (UTC)"])) + utc_offset
             price_eur_mwh = float(row[price_col].replace(",", "."))
         except (KeyError, ValueError, TypeError, OSError):
             continue
@@ -188,6 +189,7 @@ async def async_setup_platform(
 
     async def _async_update_data():
         now = dt_util.now()
+        utc_offset = now.utcoffset()
         now_naive = now.replace(tzinfo=None)
         today = now_naive.date()
         tomorrow = today + timedelta(days=1)
@@ -211,6 +213,7 @@ async def async_setup_platform(
                     night_transfer,
                     today,
                     tomorrow,
+                    utc_offset,
                 ),
                 hass.async_add_executor_job(_parse_gas_csv, gas_text, today_str, tomorrow_str),
             )
