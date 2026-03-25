@@ -146,12 +146,14 @@ def _parse_gas_csv(
     today_price: float | None = None
     tomorrow_price: float | None = None
     for row in csv.DictReader(io.StringIO(text), delimiter=";"):
-        row_date = row.get("Date", "").strip()
+        row_date = row.get("Gasday", "").strip()
         if row_date not in (today_str, tomorrow_str):
             continue
         try:
-            price = float(str(row.get("Price", "0")).replace(",", "."))
+            price = float(str(row.get("IndexValue (\u20ac/MWh)", "0")).replace(",", "."))
         except (ValueError, TypeError):
+            continue
+        if price == 0:
             continue
         if row_date == today_str and today_price is None:
             today_price = price
