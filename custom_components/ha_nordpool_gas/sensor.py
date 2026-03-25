@@ -324,6 +324,10 @@ class SpotPriceSensor(CoordinatorEntity, SensorEntity):
             attrs["hourly_today"] = data.get("hourly_today")
             attrs["hourly_tomorrow"] = data.get("hourly_tomorrow")
             attrs["tomorrow_valid"] = data.get("tomorrow_valid")
+        elif self._description.key == "electricity_hourly":
+            attrs["hourly_today"] = data.get("hourly_today")
+            attrs["hourly_tomorrow"] = data.get("hourly_tomorrow")
+            attrs["tomorrow_valid"] = data.get("tomorrow_valid")
         elif self._description.key == "gas_now":
             attrs["gas_tomorrow"] = data.get("gas_tomorrow")
         return attrs
