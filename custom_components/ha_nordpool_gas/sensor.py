@@ -74,9 +74,15 @@ SENSORS = (
 
 
 def _build_elering_url(base_url: str, area: str, today: date, tomorrow: date) -> str:
-    """Append date range and area field params to the Elering CSV base URL."""
+    """Append date range and area field params to the Elering CSV base URL.
+
+    Fetch one extra UTC day on each side so that early-morning local hours
+    (which fall in the previous UTC calendar day) are always included.
+    """
     parsed = urlparse(base_url)
-    query = urlencode({"start": f"{today}T00:00:00Z", "end": f"{tomorrow}T23:59:59Z", "fields": area})
+    start = today - timedelta(days=1)
+    end = tomorrow + timedelta(days=1)
+    query = urlencode({"start": f"{start}T00:00:00Z", "end": f"{end}T00:00:00Z", "fields": area})
     return urlunparse(parsed._replace(query=query))
 
 
