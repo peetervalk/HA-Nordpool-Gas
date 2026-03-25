@@ -1,7 +1,7 @@
 {
   "domain": "ha_nordpool_gas",
   "name": "Spot Price",
-  "version": "0.1.4"
+  "version": "0.1.4",
   "documentation": "https://github.com/peetervalk/HA-Nordpool-Gas",
   "requirements": [],
   "codeowners": [
