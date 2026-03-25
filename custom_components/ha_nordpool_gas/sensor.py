@@ -117,17 +117,13 @@ def _parse_electricity_csv(
         row_date = dt.date()
         if row_date not in (today, tomorrow):
             continue
-        price_final = price_eur_mwh * (100 + vat) / 100
         is_night_transfer = dt.hour >= 22 or dt.hour < 7 or dt.weekday() in (5, 6)
-        if is_night_transfer:
-            price_final += night_transfer
-        else:
-            price_final += day_transfer
-        item = (dt, round(price_final, 2))
+        transfer = night_transfer if is_night_transfer else day_transfer
+        price_final = round((price_eur_mwh + transfer) * (100 + vat) / 100, 2)
         if row_date == today:
-            today_rows.append(item)
+            today_rows.append((dt, price_final))
         else:
-            tomorrow_rows.append(item)
+            tomorrow_rows.append((dt, price_final))
     return today_rows, tomorrow_rows
 
 
@@ -256,7 +252,7 @@ async def async_setup_platform(
         def _to_gas_price(raw: float | None) -> float | None:
             if raw is None:
                 return None
-            return round((raw * (100 + vat) / 100) + gas_excise, 2)
+            return round((raw + gas_excise) * (100 + vat) / 100, 2)
 
         return {
             "electricity_15min": electricity_15min,
