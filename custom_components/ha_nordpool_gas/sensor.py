@@ -142,15 +142,24 @@ def _build_hourly_averages(rows: list[tuple[datetime, float]]) -> dict[int, floa
 def _parse_gas_csv(
     text: str, today_str: str, tomorrow_str: str
 ) -> tuple[float | None, float | None]:
-    """Parse EEX CSV and return (today_price, tomorrow_price) in EUR/MWh."""
+    """Parse EEX CSV and return (today_price, tomorrow_price) in EUR/MWh.
+
+    Uses column index instead of column name to avoid encoding issues with the
+    euro sign in the header (EEX serves it as Windows-1252 0x80, not UTF-8).
+    Column layout: Gasday ; IndexValue (€/MWh) ; IndexVolume ; Status ; Timestamp
+    """
     today_price: float | None = None
     tomorrow_price: float | None = None
-    for row in csv.DictReader(io.StringIO(text), delimiter=";"):
-        row_date = row.get("Gasday", "").strip()
+    reader = csv.reader(io.StringIO(text), delimiter=";")
+    next(reader, None)  # skip header row
+    for row in reader:
+        if len(row) < 2:
+            continue
+        row_date = row[0].strip()
         if row_date not in (today_str, tomorrow_str):
             continue
         try:
-            price = float(str(row.get("IndexValue (\u20ac/MWh)", "0")).replace(",", "."))
+            price = float(row[1].strip().replace(",", "."))
         except (ValueError, TypeError):
             continue
         if price == 0:
