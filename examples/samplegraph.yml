@@ -135,7 +135,7 @@ series:
     name: Electricity
     type: line
     stroke_width: 0
-    color: "#ffffff"
+    color: "#000000"
     data_generator: |
       const currentHour = new Date().getHours();
       const midnight = new Date();
