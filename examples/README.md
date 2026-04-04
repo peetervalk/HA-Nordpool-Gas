@@ -38,6 +38,8 @@ is drawing significant current.
 - Boiler **OFF immediately** when sauna current sensor exceeds 1 A
 - Boiler **back ON** after sauna finishes, if electricity is still cheaper than gas
 
+**Note:** `boiler_price_check` uses `max_exceeded: silent` to suppress "already running" warnings when both price sensors update close together.
+
 ### Required setup (before importing automation)
 
 Add this to your `configuration.yaml`:

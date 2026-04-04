@@ -24,6 +24,7 @@
     Turns boiler on when electricity is cheaper than gas,
     off when gas is equal or cheaper.
   mode: single
+  max_exceeded: silent
   trigger:
     - platform: state
       entity_id:
