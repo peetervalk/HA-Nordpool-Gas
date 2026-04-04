@@ -28,8 +28,8 @@ Bars are colour-coded:
 
 ## boiler_automation.yaml — Smart boiler control
 
-Three automations that control an electric boiler via a **Shelly Gen1 plug**
-(MQTT) based on spot prices, with an immediate override when a sauna (Shelly Gen3)
+Three automations that control an electric boiler via a **Shelly Gen1 plug over HTTP**
+based on spot prices, with an immediate override when a sauna (Shelly Gen3)
 is drawing significant current.
 
 **Logic:**
@@ -38,12 +38,36 @@ is drawing significant current.
 - Boiler **OFF immediately** when sauna current sensor exceeds 1 A
 - Boiler **back ON** after sauna finishes, if electricity is still cheaper than gas
 
-**Before using**, edit the file and adjust these values to match your setup:
+### Required setup (before importing automation)
 
-| Value | Description |
-|-------|-------------|
-| `shellies/shelly-boiler/relay/0/command` | MQTT topic for your Gen1 Shelly plug |
-| `sensor.saun_faas2_current` | HA entity ID for your Gen3 Shelly current sensor |
+Add this to your `configuration.yaml`:
 
-**Usage:** Copy the contents into your `automations.yaml` or import via
-HA → Settings → Automations → ⋮ → Import YAML.
+```yaml
+rest_command:
+  shelly_boiler_on:
+    url: "http://192.168.1.177/relay/0?turn=on"
+    method: get
+  shelly_boiler_off:
+    url: "http://192.168.1.177/relay/0?turn=off"
+    method: get
+```
+
+Then restart Home Assistant (or reload YAML config for `rest_command`).
+
+### Automation setup
+
+1. Open `examples/boiler_automation.yaml`
+2. Confirm entity IDs:
+   - `sensor.saun_faas2_current`
+   - `sensor.spot_price_gas_price`
+   - `sensor.spot_price_electricity_price_hourly`
+3. Copy content into `automations.yaml` (replace `[]` if empty list)
+4. Reload automations
+
+### Quick connectivity test
+
+From a browser on your LAN:
+- `http://192.168.1.177/relay/0?turn=on`
+- `http://192.168.1.177/relay/0?turn=off`
+
+If these URLs work, the automation control path should work as well.

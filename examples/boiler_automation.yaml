@@ -1,20 +1,28 @@
 # Boiler price optimizer + saun override
 #
-# shelly-boiler  : Gen1 Shelly Plug — MQTT command topic below is correct for Gen1
-# shelly-saun-faas2 : Gen3 — current sensor enabled in HA as an entity
+# shelly-boiler      : Gen1 Shelly Plug controlled via HTTP
+# shelly-saun-faas2  : Gen3 — current sensor enabled in HA as an entity
+#
+# REQUIRED (add to configuration.yaml):
+# rest_command:
+#   shelly_boiler_on:
+#     url: "http://192.168.1.177/relay/0?turn=on"
+#     method: get
+#   shelly_boiler_off:
+#     url: "http://192.168.1.177/relay/0?turn=off"
+#     method: get
 #
 # Adjust if needed:
-#   MQTT command topic : shellies/shelly-boiler/relay/0/command
-#   Saun current entity: sensor.saun_faas2_current  (1 A threshold)
-#   Price sensors      : sensor.spot_price_gas_price
-#                        sensor.spot_price_electricity_price_hourly
+#   Shelly IP           : 192.168.1.177
+#   Saun current entity : sensor.saun_faas2_current  (1 A threshold)
+#   Price sensors       : sensor.spot_price_gas_price
+#                         sensor.spot_price_electricity_price_hourly
 
 - id: boiler_price_check
   alias: "Boiler – Price-based on/off"
   description: >
     Turns boiler on when electricity is cheaper than gas,
-    off when gas is equal or cheaper. Skips the ON action
-    while saun is drawing current.
+    off when gas is equal or cheaper.
   mode: single
   trigger:
     - platform: state
@@ -29,15 +37,9 @@
                 {{ states('sensor.spot_price_electricity_price_hourly') | float(999)
                    < states('sensor.spot_price_gas_price') | float(0) }}
           sequence:
-            - service: mqtt.publish
-              data:
-                topic: shellies/shelly-boiler/relay/0/command
-                payload: "on"
+            - service: rest_command.shelly_boiler_on
       default:
-        - service: mqtt.publish
-          data:
-            topic: shellies/shelly-boiler/relay/0/command
-            payload: "off"
+        - service: rest_command.shelly_boiler_off
 
 - id: boiler_saun_override
   alias: "Boiler – Saun override OFF (immediate)"
@@ -49,16 +51,13 @@
       entity_id: sensor.saun_faas2_current
       above: 1
   action:
-    - service: mqtt.publish
-      data:
-        topic: shellies/shelly-boiler/relay/0/command
-        payload: "off"
+    - service: rest_command.shelly_boiler_off
 
 - id: boiler_saun_release
   alias: "Boiler – Saun released, re-evaluate price"
   description: >
     When saun current drops back to 1 A or below, turns boiler on again
-    only if gas is still cheaper than electricity.
+    only if electricity is still cheaper than gas.
   mode: single
   trigger:
     - platform: numeric_state
@@ -70,8 +69,5 @@
         {{ states('sensor.spot_price_electricity_price_hourly') | float(999)
            < states('sensor.spot_price_gas_price') | float(0) }}
   action:
-    - service: mqtt.publish
-      data:
-        topic: shellies/shelly-boiler/relay/0/command
-        payload: "on"
+    - service: rest_command.shelly_boiler_on
 
