@@ -1,0 +1,158 @@
+type: custom:apexcharts-card
+graph_span: 48h
+span:
+  start: day
+stacked: true
+header:
+  show: true
+  title: Electricity vs Gas Price
+  show_states: true
+  colorize_states: true
+now:
+  show: true
+  label: Now
+apex_config:
+  xaxis:
+    type: datetime
+  legend:
+    show: false
+  stroke:
+    curve: straight
+  plotOptions:
+    bar:
+      columnWidth: "90%"
+series:
+  - entity: sensor.spot_price_gas_price
+    name: Gas
+    type: line
+    stroke_width: 3
+    color: "#ff9800"
+    data_generator: |
+      const gas = parseFloat(entity.state);
+      const gasTomorrow = parseFloat(entity.attributes.gas_tomorrow);
+      if (isNaN(gas)) return [];
+      const midnight = new Date();
+      midnight.setHours(0, 0, 0, 0);
+      const pts = [[midnight.getTime(), gas]];
+      if (!isNaN(gasTomorrow)) {
+        pts.push([midnight.getTime() + 23 * 3600000, gas]);
+        pts.push([midnight.getTime() + 24 * 3600000, gasTomorrow]);
+        pts.push([midnight.getTime() + 48 * 3600000, gasTomorrow]);
+      } else {
+        pts.push([midnight.getTime() + 48 * 3600000, gas]);
+      }
+      pts.push([midnight.getTime() + 49 * 3600000, null]);
+      pts.push([midnight.getTime() + 50 * 3600000, gas]);
+      return pts;
+  - entity: sensor.spot_price_electricity_price_hourly
+    name: Cheap
+    type: column
+    color: "#00e676"
+    show:
+      in_header: false
+    data_generator: |
+      const gasToday = parseFloat(hass.states['sensor.spot_price_gas_price'].state);
+      const gasTomorrow = parseFloat(hass.states['sensor.spot_price_gas_price'].attributes.gas_tomorrow);
+      const currentHour = new Date().getHours();
+      const midnight = new Date();
+      midnight.setHours(0, 0, 0, 0);
+      const today = entity.attributes.hourly_today ?? {};
+      const tomorrow = entity.attributes.hourly_tomorrow ?? {};
+      const pts = [];
+      let currentPt = null;
+      for (const [h, price] of Object.entries(today)) {
+        const y = price < gasToday ? price : null;
+        const pt = [midnight.getTime() + parseInt(h) * 3600000, y];
+        if (parseInt(h) === currentHour) currentPt = pt;
+        else pts.push(pt);
+      }
+      const nextMidnight = midnight.getTime() + 86400000;
+      const gasRef = isNaN(gasTomorrow) ? gasToday : gasTomorrow;
+      for (const [h, price] of Object.entries(tomorrow)) {
+        pts.push([nextMidnight + parseInt(h) * 3600000, price < gasRef ? price : null]);
+      }
+      pts.sort((a, b) => a[0] - b[0]);
+      if (currentPt) pts.push(currentPt);
+      return pts;
+  - entity: sensor.spot_price_electricity_price_hourly
+    name: Normal
+    type: column
+    color: "#2196F3"
+    show:
+      in_header: false
+    data_generator: |
+      const gasToday = parseFloat(hass.states['sensor.spot_price_gas_price'].state);
+      const gasTomorrow = parseFloat(hass.states['sensor.spot_price_gas_price'].attributes.gas_tomorrow);
+      const currentHour = new Date().getHours();
+      const midnight = new Date();
+      midnight.setHours(0, 0, 0, 0);
+      const today = entity.attributes.hourly_today ?? {};
+      const tomorrow = entity.attributes.hourly_tomorrow ?? {};
+      const pts = [];
+      let currentPt = null;
+      for (const [h, price] of Object.entries(today)) {
+        const y = price >= gasToday && price < 400 ? price : null;
+        const pt = [midnight.getTime() + parseInt(h) * 3600000, y];
+        if (parseInt(h) === currentHour) currentPt = pt;
+        else pts.push(pt);
+      }
+      const nextMidnight = midnight.getTime() + 86400000;
+      const gasRef = isNaN(gasTomorrow) ? gasToday : gasTomorrow;
+      for (const [h, price] of Object.entries(tomorrow)) {
+        pts.push([nextMidnight + parseInt(h) * 3600000, price >= gasRef && price < 400 ? price : null]);
+      }
+      pts.sort((a, b) => a[0] - b[0]);
+      if (currentPt) pts.push(currentPt);
+      return pts;
+  - entity: sensor.spot_price_electricity_price_hourly
+    name: Expensive
+    type: column
+    color: "#ff1744"
+    show:
+      in_header: false
+    data_generator: |
+      const currentHour = new Date().getHours();
+      const midnight = new Date();
+      midnight.setHours(0, 0, 0, 0);
+      const today = entity.attributes.hourly_today ?? {};
+      const tomorrow = entity.attributes.hourly_tomorrow ?? {};
+      const pts = [];
+      let currentPt = null;
+      for (const [h, price] of Object.entries(today)) {
+        const y = price >= 400 ? price : null;
+        const pt = [midnight.getTime() + parseInt(h) * 3600000, y];
+        if (parseInt(h) === currentHour) currentPt = pt;
+        else pts.push(pt);
+      }
+      const nextMidnight = midnight.getTime() + 86400000;
+      for (const [h, price] of Object.entries(tomorrow)) {
+        pts.push([nextMidnight + parseInt(h) * 3600000, price >= 400 ? price : null]);
+      }
+      pts.sort((a, b) => a[0] - b[0]);
+      if (currentPt) pts.push(currentPt);
+      return pts;
+  - entity: sensor.spot_price_electricity_price_hourly
+    name: Electricity
+    type: line
+    stroke_width: 0
+    color: "#000000"
+    data_generator: |
+      const currentHour = new Date().getHours();
+      const midnight = new Date();
+      midnight.setHours(0, 0, 0, 0);
+      const today = entity.attributes.hourly_today ?? {};
+      const tomorrow = entity.attributes.hourly_tomorrow ?? {};
+      const pts = [];
+      let currentPt = null;
+      for (const [h, price] of Object.entries(today)) {
+        const pt = [midnight.getTime() + parseInt(h) * 3600000, price];
+        if (parseInt(h) === currentHour) currentPt = pt;
+        else pts.push(pt);
+      }
+      const nextMidnight = midnight.getTime() + 86400000;
+      for (const [h, price] of Object.entries(tomorrow)) {
+        pts.push([nextMidnight + parseInt(h) * 3600000, price]);
+      }
+      pts.sort((a, b) => a[0] - b[0]);
+      if (currentPt) pts.push(currentPt);
+      return pts;

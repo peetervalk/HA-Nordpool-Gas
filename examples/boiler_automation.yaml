@@ -1,0 +1,74 @@
+# Boiler price optimizer + saun override
+#
+# shelly-boiler      : Gen1 Shelly Plug controlled via HTTP
+# shelly-saun-faas2  : Gen3 — current sensor enabled in HA as an entity
+#
+# REQUIRED (add to configuration.yaml):
+# rest_command:
+#   shelly_boiler_on:
+#     url: "http://192.168.1.177/relay/0?turn=on"
+#     method: get
+#   shelly_boiler_off:
+#     url: "http://192.168.1.177/relay/0?turn=off"
+#     method: get
+#
+# Adjust if needed:
+#   Shelly IP           : 192.168.1.177
+#   Saun current entity : sensor.saun_faas2_current  (1 A threshold)
+#   Price sensors       : sensor.spot_price_gas_price
+#                         sensor.spot_price_electricity_price_hourly
+
+- id: boiler_price_check
+  alias: "Boiler – Price-based on/off"
+  description: >
+    Turns boiler on when electricity is cheaper than gas,
+    off when gas is equal or cheaper.
+  mode: single
+  max_exceeded: silent
+  trigger:
+    - platform: state
+      entity_id:
+        - sensor.spot_price_electricity_price_hourly
+        - sensor.spot_price_gas_price
+  action:
+    - choose:
+        - conditions:
+            - condition: template
+              value_template: >
+                {{ states('sensor.spot_price_electricity_price_hourly') | float(999)
+                   < states('sensor.spot_price_gas_price') | float(0) }}
+          sequence:
+            - service: rest_command.shelly_boiler_on
+      default:
+        - service: rest_command.shelly_boiler_off
+
+- id: boiler_saun_override
+  alias: "Boiler – Saun override OFF (immediate)"
+  description: >
+    Turns boiler off the moment the saun current sensor crosses above 1 A.
+  mode: single
+  trigger:
+    - platform: numeric_state
+      entity_id: sensor.saun_faas2_current
+      above: 1
+  action:
+    - service: rest_command.shelly_boiler_off
+
+- id: boiler_saun_release
+  alias: "Boiler – Saun released, re-evaluate price"
+  description: >
+    When saun current drops back to 1 A or below, turns boiler on again
+    only if electricity is still cheaper than gas.
+  mode: single
+  trigger:
+    - platform: numeric_state
+      entity_id: sensor.saun_faas2_current
+      below: 1
+  condition:
+    - condition: template
+      value_template: >
+        {{ states('sensor.spot_price_electricity_price_hourly') | float(999)
+           < states('sensor.spot_price_gas_price') | float(0) }}
+  action:
+    - service: rest_command.shelly_boiler_on
+
