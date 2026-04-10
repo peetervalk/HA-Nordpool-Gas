@@ -1,4 +1,7 @@
 __pycache__/
 *.pyc
 .vs/
-MQTT_SPEC.md
+.vscode/
+.idea/
+*.txt
+samplegraph*.yaml
