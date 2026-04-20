@@ -7,6 +7,7 @@ import logging
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
+from typing import Any
 from urllib.parse import urlencode, urlparse, urlunparse
 
 import voluptuous as vol
@@ -93,14 +94,14 @@ def _parse_electricity_csv(
     night_transfer: float,
     today: date,
     tomorrow: date,
-    utc_offset: timedelta,
 ) -> tuple[list[tuple[datetime, float]], list[tuple[datetime, float]]]:
     """Parse Elering CSV (semicolon-delimited), return (today_rows, tomorrow_rows).
 
     Columns: 'Ajatempel (UTC)' (Unix epoch UTC), 'Kuupäev (Eesti aeg)' (local datetime string),
     and a price column whose name varies by area (e.g. 'NPS Eesti') — always the last column.
     Prices are in EUR/MWh with comma as the decimal separator.
-    Timestamps are converted from UTC epoch to local system time.
+    Timestamps are converted per-row to HA local timezone via dt_util.as_local(),
+    which correctly handles DST transitions across the fetched window.
     """
     today_rows: list[tuple[datetime, float]] = []
     tomorrow_rows: list[tuple[datetime, float]] = []
@@ -110,7 +111,7 @@ def _parse_electricity_csv(
         return today_rows, tomorrow_rows
     for row in reader:
         try:
-            dt = datetime.utcfromtimestamp(int(row["Ajatempel (UTC)"])) + utc_offset
+            dt = dt_util.as_local(dt_util.utc_from_timestamp(int(row["Ajatempel (UTC)"]))).replace(tzinfo=None)
             price_eur_mwh = float(row[price_col].replace(",", "."))
         except (KeyError, ValueError, TypeError, OSError):
             continue
@@ -202,7 +203,6 @@ async def async_setup_platform(
 
     async def _async_update_data():
         now = dt_util.now()
-        utc_offset = now.utcoffset()
         now_naive = now.replace(tzinfo=None)
         today = now_naive.date()
         tomorrow = today + timedelta(days=1)
@@ -226,7 +226,6 @@ async def async_setup_platform(
                     night_transfer,
                     today,
                     tomorrow,
-                    utc_offset,
                 ),
                 hass.async_add_executor_job(_parse_gas_csv, gas_text, today_str, tomorrow_str),
             )
@@ -281,10 +280,7 @@ async def async_setup_platform(
     cancel_quarterly = async_track_time_change(
         hass, _handle_time_update, minute=[0, 15, 30, 45], second=5
     )
-    cancel_new_prices = async_track_time_change(
-        hass, _handle_time_update, hour=16, minute=0, second=5
-    )
-    hass.data.setdefault(DOMAIN, []).extend([cancel_quarterly, cancel_new_prices])
+    hass.data.setdefault(DOMAIN, []).append(cancel_quarterly)
 
     await coordinator.async_refresh()
 
@@ -316,11 +312,11 @@ class SpotPriceSensor(CoordinatorEntity, SensorEntity):
         self._attr_unique_id = f"{DOMAIN}_{base_name.lower().replace(' ', '_')}_{description.key}"
 
     @property
-    def native_value(self):
+    def native_value(self) -> float | None:
         return self.coordinator.data.get(self._description.data_key)
 
     @property
-    def extra_state_attributes(self):
+    def extra_state_attributes(self) -> dict[str, Any]:
         data = self.coordinator.data
         attrs = {"updated_at": data.get("updated_at")}
         if self._description.key == "electricity_15min":

@@ -4,7 +4,7 @@ Fetches electricity and gas spot prices and exposes them as Home Assistant senso
 
 **Electricity** is fetched from the [Elering NPS price API](https://dashboard.elering.ee/api/nps/price/csv) at 15-minute resolution. **Gas** is fetched from the [EEX NGP daily CSV](https://gasandregistry.eex.com/Gas/NGP/LVA-EST_NGP_15_Mins.csv).
 
-Both today's and tomorrow's prices are fetched on every update. Tomorrow's electricity prices are explicitly re-fetched at **16:00** (when Nord Pool prices are expected to be available in Elering).
+Both today's and tomorrow's prices are fetched on every update. 
 
 ## Entities
 
