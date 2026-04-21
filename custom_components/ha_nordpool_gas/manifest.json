@@ -3,6 +3,7 @@
   "name": "Spot Price",
   "version": "0.1.7",
   "documentation": "https://github.com/peetervalk/HA-Nordpool-Gas",
+  "issue_tracker": "https://github.com/peetervalk/HA-Nordpool-Gas/issues",
   "requirements": [],
   "codeowners": [
     "@peetervalk"
