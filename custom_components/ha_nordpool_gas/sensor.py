@@ -209,6 +209,8 @@ async def async_setup_platform(
         today_str = now_naive.strftime("%d/%m/%Y")
         tomorrow_str = (now_naive + timedelta(days=1)).strftime("%d/%m/%Y")
 
+        prev = coordinator.data or {}
+
         elering_url = _build_elering_url(electricity_url, area, today, tomorrow)
 
         electricity_text, gas_text = await asyncio.gather(
@@ -216,20 +218,33 @@ async def async_setup_platform(
             _fetch(gas_url, verify_ssl=False),
         )
 
-        (today_elec_rows, tomorrow_elec_rows), (gas_today_raw, gas_tomorrow_raw) = (
-            await asyncio.gather(
-                hass.async_add_executor_job(
-                    _parse_electricity_csv,
-                    electricity_text,
-                    vat,
-                    day_transfer,
-                    night_transfer,
-                    today,
-                    tomorrow,
-                ),
-                hass.async_add_executor_job(_parse_gas_csv, gas_text, today_str, tomorrow_str),
+        # --- Electricity ---
+        if electricity_text:
+            today_elec_rows, tomorrow_elec_rows = await hass.async_add_executor_job(
+                _parse_electricity_csv,
+                electricity_text,
+                vat,
+                day_transfer,
+                night_transfer,
+                today,
+                tomorrow,
             )
-        )
+            electricity_stale = not today_elec_rows
+        else:
+            today_elec_rows = []
+            tomorrow_elec_rows = []
+            electricity_stale = True
+
+        if electricity_stale:
+            _LOGGER.debug("Electricity fetch yielded no data; retaining previous values")
+            today_elec_rows = [
+                (datetime.fromtimestamp(ts), price)
+                for ts, price in (prev.get("electricity_rows_today") or [])
+            ]
+            tomorrow_elec_rows = [
+                (datetime.fromtimestamp(ts), price)
+                for ts, price in (prev.get("electricity_rows_tomorrow") or [])
+            ]
 
         hourly_today, hourly_tomorrow = await asyncio.gather(
             hass.async_add_executor_job(_build_hourly_averages, today_elec_rows),
@@ -248,16 +263,34 @@ async def async_setup_platform(
 
         electricity_hourly = hourly_today.get(now_naive.hour)
 
+        # --- Gas ---
+        if gas_text:
+            gas_today_raw, gas_tomorrow_raw = await hass.async_add_executor_job(
+                _parse_gas_csv, gas_text, today_str, tomorrow_str
+            )
+        else:
+            gas_today_raw = None
+            gas_tomorrow_raw = None
+
         def _to_gas_price(raw: float | None) -> float | None:
             if raw is None:
                 return None
             return round((raw + gas_excise) * (100 + vat) / 100, 2)
 
+        gas_now = _to_gas_price(gas_today_raw)
+        if gas_now is None:
+            _LOGGER.debug("Gas today price unavailable; retaining previous value")
+            gas_now = prev.get("gas_now")
+
+        gas_tomorrow = _to_gas_price(gas_tomorrow_raw)
+        if gas_tomorrow is None:
+            gas_tomorrow = prev.get("gas_tomorrow")
+
         return {
             "electricity_15min": electricity_15min,
             "electricity_hourly": electricity_hourly,
-            "gas_now": _to_gas_price(gas_today_raw),
-            "gas_tomorrow": _to_gas_price(gas_tomorrow_raw),
+            "gas_now": gas_now,
+            "gas_tomorrow": gas_tomorrow,
             "electricity_rows_today": _rows_to_list(today_elec_rows),
             "electricity_rows_tomorrow": _rows_to_list(tomorrow_elec_rows),
             "hourly_today": hourly_today,
@@ -280,7 +313,15 @@ async def async_setup_platform(
     cancel_quarterly = async_track_time_change(
         hass, _handle_time_update, minute=[0, 15, 30, 45], second=5
     )
-    hass.data.setdefault(DOMAIN, []).append(cancel_quarterly)
+    domain_data = hass.data.setdefault(DOMAIN, {"coordinators": [], "cancel_fns": []})
+    domain_data["coordinators"].append(coordinator)
+    domain_data["cancel_fns"].append(cancel_quarterly)
+
+    if not hass.services.has_service(DOMAIN, "refresh"):
+        async def _handle_refresh_service(call):
+            for coord in hass.data[DOMAIN]["coordinators"]:
+                await coord.async_request_refresh()
+        hass.services.async_register(DOMAIN, "refresh", _handle_refresh_service)
 
     await coordinator.async_refresh()
 
