@@ -2,8 +2,8 @@
 
 Fetches electricity and gas spot prices and exposes them as Home Assistant sensor entities.
 
-**Electricity** is fetched from the [Elering NPS price API](https://dashboard.elering.ee/api/nps/price/csv) at 15-minute resolution.
-**Gas** is fetched from the [EEX NGP daily CSV](https://gasandregistry.eex.com/Gas/NGP/) — the correct file is selected automatically based on the configured region.
+**Electricity** is fetched from the [Elering NPS price API](https://dashboard.elering.ee/assets/swagger-ui/index.html#/nps-controller/getPriceAsCSV) at 15-minute resolution.
+**Gas** is fetched from the [EEX NGP daily CSV](https://www.eex.com/en/market-data/market-data-hub/natural-gas/indices) — the correct file is selected automatically based on the configured region.
 
 Both today's and tomorrow's prices are fetched on every update. Sensors refresh at **:00, :15, :30 and :45** each hour.
 
@@ -20,11 +20,11 @@ Both today's and tomorrow's prices are fetched on every update. Sensors refresh 
 
 Three sensor entities are created per configured integration entry:
 
-| Entity | State | Notable attributes |
+| Entity | State | Attributes |
 |---|---|---|
-| `<name> Electricity Price 15min` | Current 15-min slot price (EUR/MWh) | `electricity_rows_today`, `electricity_rows_tomorrow`, `hourly_today`, `hourly_tomorrow`, `tomorrow_valid`, `updated_at` |
-| `<name> Electricity Price Hourly` | Hourly average of the four 15-min prices (EUR/MWh) | `hourly_today`, `hourly_tomorrow`, `tomorrow_valid`, `updated_at` |
-| `<name> Gas Price` | Today's gas price (EUR/MWh) | `gas_tomorrow`, `updated_at` |
+| `Electricity Price 15min` | Current 15-min slot price (EUR/MWh) | `electricity_rows_today`, `electricity_rows_tomorrow`, `hourly_today`, `hourly_tomorrow`, `tomorrow_valid`, `updated_at` |
+| `Electricity Price Hourly` | Hourly average of the four 15-min prices (EUR/MWh) | `hourly_today`, `hourly_tomorrow`, `tomorrow_valid`, `updated_at` |
+| `Gas Price` | Today's gas price (EUR/MWh) | `gas_tomorrow`, `updated_at` |
 
 All prices include VAT and any configured network transfer fees.
 
@@ -46,7 +46,7 @@ All prices include VAT and any configured network transfer fees.
 
 ## Configuration
 
-Setup is done entirely through the UI — no `configuration.yaml` editing required.
+Setup is done through UI.
 
 ### Setup wizard — step 1: General settings
 
@@ -56,6 +56,8 @@ Setup is done entirely through the UI — no `configuration.yaml` editing requir
 | VAT (%) | Applied to both electricity and gas prices | 24.0 |
 | Gas excise duty (EUR/MWh) | Fixed excise added to the raw gas price | 0.0 |
 | Network transfer fee type | How the electricity network tariff is included — see below | None |
+
+Add all costs excluding VAT.
 
 ### Setup wizard — step 2: Transfer fees (conditional)
 

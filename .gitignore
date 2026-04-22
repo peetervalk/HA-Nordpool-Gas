@@ -5,3 +5,7 @@ __pycache__/
 .idea/
 *.txt
 samplegraph*.yaml
+
+# Ignore other assets except icon.png
+/custom_components/ha_nordpool_gas/brand/*
+!/custom_components/ha_nordpool_gas/brand/icon.png
