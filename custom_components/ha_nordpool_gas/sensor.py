@@ -7,54 +7,38 @@ import logging
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import urlencode, urlparse, urlunparse
 
-import voluptuous as vol
-
 from homeassistant.components.sensor import SensorEntity
-from homeassistant.const import CONF_NAME
+from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 import homeassistant.util.dt as dt_util
-from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.event import async_track_time_change
 from homeassistant.helpers.update_coordinator import CoordinatorEntity, DataUpdateCoordinator
 
 from .const import (
+    CONF_AREA,
+    CONF_GAS_EXCISE,
+    CONF_TRANSFER_DAY,
+    CONF_TRANSFER_DAY_END,
+    CONF_TRANSFER_DAY_START,
+    CONF_TRANSFER_FIXED,
+    CONF_TRANSFER_MODE,
+    CONF_TRANSFER_NIGHT,
+    CONF_TRANSFER_WEEKENDS_NIGHT,
+    CONF_VAT,
     DEFAULT_AREA,
-    DEFAULT_DAY_TRANSFER,
     DEFAULT_GAS_EXCISE,
-    DEFAULT_NAME,
-    DEFAULT_NIGHT_TRANSFER,
     DEFAULT_VAT,
     DOMAIN,
-    EEX_URL,
     ELERING_URL,
-)
-
-CONF_ELECTRICITY_URL = "electricity_url"
-CONF_GAS_URL = "gas_url"
-CONF_AREA = "area"
-CONF_VAT = "vat"
-CONF_DAY_TRANSFER = "day_transfer"
-CONF_NIGHT_TRANSFER = "night_transfer"
-CONF_GAS_EXCISE = "gas_excise"
-
-_AREAS = ["ee", "fi", "lt", "lv"]
-
-PLATFORM_SCHEMA = cv.PLATFORM_SCHEMA.extend(
-    {
-        vol.Optional(CONF_NAME, default=DEFAULT_NAME): cv.string,
-        vol.Optional(CONF_ELECTRICITY_URL, default=ELERING_URL): cv.string,
-        vol.Optional(CONF_GAS_URL, default=EEX_URL): cv.string,
-        vol.Optional(CONF_AREA, default=DEFAULT_AREA): vol.In(_AREAS),
-        vol.Optional(CONF_VAT, default=DEFAULT_VAT): vol.Coerce(float),
-        vol.Optional(CONF_DAY_TRANSFER, default=DEFAULT_DAY_TRANSFER): vol.Coerce(float),
-        vol.Optional(CONF_NIGHT_TRANSFER, default=DEFAULT_NIGHT_TRANSFER): vol.Coerce(float),
-        vol.Optional(CONF_GAS_EXCISE, default=DEFAULT_GAS_EXCISE): vol.Coerce(float),
-    }
+    GAS_URL_BY_AREA,
+    TRANSFER_MODE_DAY_NIGHT,
+    TRANSFER_MODE_FIXED,
+    TRANSFER_MODE_NONE,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -87,18 +71,41 @@ def _build_elering_url(base_url: str, area: str, today: date, tomorrow: date) ->
     return urlunparse(parsed._replace(query=query))
 
 
+def _make_transfer_fn(config: dict) -> Callable[[datetime], float]:
+    """Return a callable that computes the network transfer fee for a naive local datetime."""
+    mode = config.get(CONF_TRANSFER_MODE, TRANSFER_MODE_NONE)
+    if mode == TRANSFER_MODE_FIXED:
+        fee = float(config.get(CONF_TRANSFER_FIXED, 0.0))
+        return lambda _dt: fee
+    if mode == TRANSFER_MODE_DAY_NIGHT:
+        day_rate = float(config.get(CONF_TRANSFER_DAY, 0.0))
+        night_rate = float(config.get(CONF_TRANSFER_NIGHT, 0.0))
+        day_start = int(config.get(CONF_TRANSFER_DAY_START, 7))
+        day_end = int(config.get(CONF_TRANSFER_DAY_END, 22))
+        weekends_night = bool(config.get(CONF_TRANSFER_WEEKENDS_NIGHT, True))
+
+        def _day_night_fn(dt: datetime) -> float:
+            is_weekend = dt.weekday() in (5, 6)
+            is_night_hours = dt.hour >= day_end or dt.hour < day_start
+            if is_night_hours or (weekends_night and is_weekend):
+                return night_rate
+            return day_rate
+
+        return _day_night_fn
+    return lambda _dt: 0.0
+
+
 def _parse_electricity_csv(
     text: str,
     vat: float,
-    day_transfer: float,
-    night_transfer: float,
+    transfer_fn: Callable[[datetime], float],
     today: date,
     tomorrow: date,
 ) -> tuple[list[tuple[datetime, float]], list[tuple[datetime, float]]]:
     """Parse Elering CSV (semicolon-delimited), return (today_rows, tomorrow_rows).
 
-    Columns: 'Ajatempel (UTC)' (Unix epoch UTC), 'Kuupäev (Eesti aeg)' (local datetime string),
-    and a price column whose name varies by area (e.g. 'NPS Eesti') — always the last column.
+    Columns: 'Ajatempel (UTC)' (Unix epoch UTC), a local-time string column (ignored),
+    and a price column whose name varies by area — always the last column.
     Prices are in EUR/MWh with comma as the decimal separator.
     Timestamps are converted per-row to HA local timezone via dt_util.as_local(),
     which correctly handles DST transitions across the fetched window.
@@ -118,8 +125,7 @@ def _parse_electricity_csv(
         row_date = dt.date()
         if row_date not in (today, tomorrow):
             continue
-        is_night_transfer = dt.hour >= 22 or dt.hour < 7 or dt.weekday() in (5, 6)
-        transfer = night_transfer if is_night_transfer else day_transfer
+        transfer = transfer_fn(dt)
         price_final = round((price_eur_mwh + transfer) * (100 + vat) / 100, 2)
         if row_date == today:
             today_rows.append((dt, price_final))
@@ -175,20 +181,17 @@ def _rows_to_list(rows: list[tuple[datetime, float]]) -> list[list]:
     return [[int(dt.timestamp()), price] for dt, price in rows]
 
 
-async def async_setup_platform(
+async def async_setup_entry(
     hass: HomeAssistant,
-    config,
+    entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
-    discovery_info=None,
 ) -> None:
-    name = config[CONF_NAME]
-    electricity_url = config[CONF_ELECTRICITY_URL]
-    gas_url = config[CONF_GAS_URL]
-    area = config[CONF_AREA]
-    vat = config[CONF_VAT]
-    day_transfer = config[CONF_DAY_TRANSFER]
-    night_transfer = config[CONF_NIGHT_TRANSFER]
-    gas_excise = config[CONF_GAS_EXCISE]
+    config = {**entry.data, **entry.options}
+    area = config.get(CONF_AREA, DEFAULT_AREA)
+    vat = float(config.get(CONF_VAT, DEFAULT_VAT))
+    gas_excise = float(config.get(CONF_GAS_EXCISE, DEFAULT_GAS_EXCISE))
+    gas_url = GAS_URL_BY_AREA.get(area, GAS_URL_BY_AREA["ee"])
+    transfer_fn = _make_transfer_fn(config)
 
     session = async_get_clientsession(hass)
 
@@ -211,7 +214,7 @@ async def async_setup_platform(
 
         prev = coordinator.data or {}
 
-        elering_url = _build_elering_url(electricity_url, area, today, tomorrow)
+        elering_url = _build_elering_url(ELERING_URL, area, today, tomorrow)
 
         electricity_text, gas_text = await asyncio.gather(
             _fetch(elering_url),
@@ -224,8 +227,7 @@ async def async_setup_platform(
                 _parse_electricity_csv,
                 electricity_text,
                 vat,
-                day_transfer,
-                night_transfer,
+                transfer_fn,
                 today,
                 tomorrow,
             )
@@ -302,7 +304,7 @@ async def async_setup_platform(
     coordinator = DataUpdateCoordinator(
         hass,
         logger=_LOGGER,
-        name=f"{DOMAIN}_{name}",
+        name=f"{DOMAIN}_{entry.entry_id}",
         update_interval=None,
         update_method=_async_update_data,
     )
@@ -313,20 +315,22 @@ async def async_setup_platform(
     cancel_quarterly = async_track_time_change(
         hass, _handle_time_update, minute=[0, 15, 30, 45], second=5
     )
-    domain_data = hass.data.setdefault(DOMAIN, {"coordinators": [], "cancel_fns": []})
-    domain_data["coordinators"].append(coordinator)
-    domain_data["cancel_fns"].append(cancel_quarterly)
+
+    hass.data.setdefault(DOMAIN, {})
+    hass.data[DOMAIN][entry.entry_id] = coordinator
+    entry.async_on_unload(cancel_quarterly)
+    entry.async_on_unload(lambda: hass.data[DOMAIN].pop(entry.entry_id, None))
 
     if not hass.services.has_service(DOMAIN, "refresh"):
         async def _handle_refresh_service(call):
-            for coord in hass.data[DOMAIN]["coordinators"]:
+            for coord in hass.data[DOMAIN].values():
                 await coord.async_request_refresh()
         hass.services.async_register(DOMAIN, "refresh", _handle_refresh_service)
 
     await coordinator.async_refresh()
 
     async_add_entities(
-        [SpotPriceSensor(coordinator, name, description) for description in SENSORS]
+        [SpotPriceSensor(coordinator, entry.entry_id, entry.title, description) for description in SENSORS]
     )
 
 
@@ -344,13 +348,14 @@ class SpotPriceSensor(CoordinatorEntity, SensorEntity):
     def __init__(
         self,
         coordinator: DataUpdateCoordinator,
+        entry_id: str,
         base_name: str,
         description: PriceSensorDescription,
     ) -> None:
         super().__init__(coordinator)
         self._description = description
         self._attr_name = f"{base_name} {description.name}"
-        self._attr_unique_id = f"{DOMAIN}_{base_name.lower().replace(' ', '_')}_{description.key}"
+        self._attr_unique_id = f"{DOMAIN}_{entry_id}_{description.key}"
 
     @property
     def native_value(self) -> float | None:

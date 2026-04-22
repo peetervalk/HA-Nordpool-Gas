@@ -4,9 +4,10 @@
   "codeowners": [
     "@peetervalk"
   ],
+  "config_flow": true,
   "documentation": "https://github.com/peetervalk/HA-Nordpool-Gas",
   "iot_class": "cloud_polling",
   "issue_tracker": "https://github.com/peetervalk/HA-Nordpool-Gas/issues",
   "requirements": [],
-  "version": "0.1.7"
+  "version": "0.1.10"
 }

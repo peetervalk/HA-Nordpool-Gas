@@ -1,0 +1,70 @@
+{
+  "title": "Spot Price",
+  "config": {
+    "step": {
+      "user": {
+        "title": "Set up Spot Price",
+        "data": {
+          "area": "Region",
+          "vat": "VAT (%)",
+          "gas_excise": "Gas excise duty (EUR/MWh)",
+          "transfer_mode": "Network transfer fee type"
+        },
+        "data_description": {
+          "transfer_mode": "How the electricity network transfer fee is included in prices"
+        }
+      },
+      "transfer_fixed": {
+        "title": "Fixed Transfer Fee",
+        "data": {
+          "transfer_fixed": "Transfer fee (EUR/MWh)"
+        }
+      },
+      "transfer_day_night": {
+        "title": "Day / Night Transfer Fees",
+        "data": {
+          "transfer_day": "Day rate (EUR/MWh)",
+          "transfer_night": "Night rate (EUR/MWh)",
+          "transfer_day_start": "Day starts at (hour 0–23)",
+          "transfer_day_end": "Day ends at (hour 0–23)",
+          "transfer_weekends_night": "Weekends always use night rate"
+        }
+      }
+    },
+    "abort": {
+      "already_configured": "Spot Price is already configured"
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Update Spot Price settings",
+        "data": {
+          "area": "Region",
+          "vat": "VAT (%)",
+          "gas_excise": "Gas excise duty (EUR/MWh)",
+          "transfer_mode": "Network transfer fee type"
+        },
+        "data_description": {
+          "transfer_mode": "How the electricity network transfer fee is included in prices"
+        }
+      },
+      "transfer_fixed": {
+        "title": "Fixed Transfer Fee",
+        "data": {
+          "transfer_fixed": "Transfer fee (EUR/MWh)"
+        }
+      },
+      "transfer_day_night": {
+        "title": "Day / Night Transfer Fees",
+        "data": {
+          "transfer_day": "Day rate (EUR/MWh)",
+          "transfer_night": "Night rate (EUR/MWh)",
+          "transfer_day_start": "Day starts at (hour 0–23)",
+          "transfer_day_end": "Day ends at (hour 0–23)",
+          "transfer_weekends_night": "Weekends always use night rate"
+        }
+      }
+    }
+  }
+}
