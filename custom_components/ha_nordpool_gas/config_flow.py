@@ -109,6 +109,8 @@ class SpotPriceConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
     async def async_step_user(self, user_input: dict | None = None) -> ConfigFlowResult:
         if user_input is not None:
+            await self.async_set_unique_id(user_input[CONF_AREA])
+            self._abort_if_unique_id_configured()
             self._data.update(user_input)
             if user_input[CONF_TRANSFER_MODE] == TRANSFER_MODE_FIXED:
                 return await self.async_step_transfer_fixed()

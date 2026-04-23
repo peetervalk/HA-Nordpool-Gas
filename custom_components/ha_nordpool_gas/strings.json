@@ -32,7 +32,7 @@
       }
     },
     "abort": {
-      "already_configured": "Spot Price is already configured"
+      "already_configured": "Spot Price is already configured for this region"
     }
   },
   "options": {
