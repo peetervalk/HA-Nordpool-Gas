@@ -60,6 +60,18 @@ _NUM_PCT = NumberSelectorConfig(min=0, max=100, step=0.1, mode=NumberSelectorMod
 _NUM_HOUR = NumberSelectorConfig(min=0, max=23, step=1, mode=NumberSelectorMode.BOX)
 
 
+def _options_base_schema(defaults: dict) -> vol.Schema:
+    return vol.Schema(
+        {
+            vol.Required(CONF_VAT, default=defaults.get(CONF_VAT, DEFAULT_VAT)): NumberSelector(_NUM_PCT),
+            vol.Required(CONF_GAS_EXCISE, default=defaults.get(CONF_GAS_EXCISE, DEFAULT_GAS_EXCISE)): NumberSelector(_NUM),
+            vol.Required(CONF_TRANSFER_MODE, default=defaults.get(CONF_TRANSFER_MODE, DEFAULT_TRANSFER_MODE)): SelectSelector(
+                SelectSelectorConfig(options=_TRANSFER_MODE_OPTIONS, mode=SelectSelectorMode.DROPDOWN)
+            ),
+        }
+    )
+
+
 def _base_schema(defaults: dict) -> vol.Schema:
     return vol.Schema(
         {
@@ -157,12 +169,11 @@ class SpotPriceOptionsFlow(config_entries.OptionsFlow):
             return self.async_create_entry(title="", data=self._data)
 
         defaults = {
-            CONF_AREA: self._current(CONF_AREA, DEFAULT_AREA),
             CONF_VAT: self._current(CONF_VAT, DEFAULT_VAT),
             CONF_GAS_EXCISE: self._current(CONF_GAS_EXCISE, DEFAULT_GAS_EXCISE),
             CONF_TRANSFER_MODE: self._current(CONF_TRANSFER_MODE, DEFAULT_TRANSFER_MODE),
         }
-        return self.async_show_form(step_id="init", data_schema=_base_schema(defaults))
+        return self.async_show_form(step_id="init", data_schema=_options_base_schema(defaults))
 
     async def async_step_transfer_fixed(self, user_input: dict | None = None) -> ConfigFlowResult:
         if user_input is not None:

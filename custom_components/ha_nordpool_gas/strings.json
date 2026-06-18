@@ -40,7 +40,6 @@
       "init": {
         "title": "Update Spot Price settings",
         "data": {
-          "area": "Region",
           "vat": "VAT (%)",
           "gas_excise": "Gas excise duty (EUR/MWh)",
           "transfer_mode": "Network transfer fee type"

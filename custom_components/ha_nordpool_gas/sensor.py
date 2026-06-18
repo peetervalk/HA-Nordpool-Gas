@@ -4,17 +4,22 @@ import asyncio
 import csv
 import io
 import logging
+import random
+import time
+
+import aiohttp
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from typing import Any, Callable
 from urllib.parse import urlencode, urlparse, urlunparse
 
-from homeassistant.components.sensor import SensorEntity
+from homeassistant.components.sensor import SensorEntity, SensorStateClass
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 import homeassistant.util.dt as dt_util
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.event import async_track_time_change
 from homeassistant.helpers.update_coordinator import CoordinatorEntity, DataUpdateCoordinator
@@ -42,6 +47,8 @@ from .const import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+GAS_STALE_SECONDS = 3600
 
 
 @dataclass(frozen=True)
@@ -118,7 +125,7 @@ def _parse_electricity_csv(
         return today_rows, tomorrow_rows
     for row in reader:
         try:
-            dt = dt_util.as_local(dt_util.utc_from_timestamp(int(row["Ajatempel (UTC)"]))).replace(tzinfo=None)
+            dt = dt_util.as_local(dt_util.utc_from_timestamp(int(row["Ajatempel (UTC)"])))
             price_eur_mwh = float(row[price_col].replace(",", "."))
         except (KeyError, ValueError, TypeError, OSError):
             continue
@@ -195,12 +202,12 @@ async def async_setup_entry(
 
     session = async_get_clientsession(hass)
 
-    async def _fetch(url: str, verify_ssl: bool = True) -> str:
+    async def _fetch(url: str) -> str:
         try:
-            resp = await session.get(url, timeout=30, ssl=None if verify_ssl else False)
+            resp = await session.get(url, timeout=30)
             resp.raise_for_status()
             return await resp.text()
-        except Exception as err:
+        except (aiohttp.ClientError, asyncio.TimeoutError) as err:
             _LOGGER.error("Error fetching %s: %s", url, err)
             return ""
 
@@ -218,7 +225,7 @@ async def async_setup_entry(
 
         electricity_text, gas_text = await asyncio.gather(
             _fetch(elering_url),
-            _fetch(gas_url, verify_ssl=False),
+            _fetch(gas_url),
         )
 
         # --- Electricity ---
@@ -240,11 +247,11 @@ async def async_setup_entry(
         if electricity_stale:
             _LOGGER.debug("Electricity fetch yielded no data; retaining previous values")
             today_elec_rows = [
-                (datetime.fromtimestamp(ts), price)
+                (dt_util.as_local(dt_util.utc_from_timestamp(ts)), price)
                 for ts, price in (prev.get("electricity_rows_today") or [])
             ]
             tomorrow_elec_rows = [
-                (datetime.fromtimestamp(ts), price)
+                (dt_util.as_local(dt_util.utc_from_timestamp(ts)), price)
                 for ts, price in (prev.get("electricity_rows_tomorrow") or [])
             ]
 
@@ -279,10 +286,14 @@ async def async_setup_entry(
                 return None
             return round((raw + gas_excise) * (100 + vat) / 100, 2)
 
-        gas_now = _to_gas_price(gas_today_raw)
-        if gas_now is None:
+        gas_now_fresh = _to_gas_price(gas_today_raw)
+        if gas_now_fresh is not None:
+            gas_now = gas_now_fresh
+            gas_fresh_at = int(now.timestamp())
+        else:
             _LOGGER.debug("Gas today price unavailable; retaining previous value")
             gas_now = prev.get("gas_now")
+            gas_fresh_at = prev.get("gas_fresh_at")
 
         gas_tomorrow = _to_gas_price(gas_tomorrow_raw)
         if gas_tomorrow is None:
@@ -293,6 +304,7 @@ async def async_setup_entry(
             "electricity_hourly": electricity_hourly,
             "gas_now": gas_now,
             "gas_tomorrow": gas_tomorrow,
+            "gas_fresh_at": gas_fresh_at,
             "electricity_rows_today": _rows_to_list(today_elec_rows),
             "electricity_rows_tomorrow": _rows_to_list(tomorrow_elec_rows),
             "hourly_today": hourly_today,
@@ -312,8 +324,9 @@ async def async_setup_entry(
     async def _handle_time_update(_now=None):
         await coordinator.async_request_refresh()
 
+    jitter_second = random.randint(5, 59)
     cancel_quarterly = async_track_time_change(
-        hass, _handle_time_update, minute=[0, 15, 30, 45], second=5
+        hass, _handle_time_update, minute=[0, 15, 30, 45], second=jitter_second
     )
 
     hass.data.setdefault(DOMAIN, {})
@@ -336,6 +349,7 @@ async def async_setup_entry(
 
 class SpotPriceSensor(CoordinatorEntity, SensorEntity):
     _attr_native_unit_of_measurement = "EUR/MWh"
+    _attr_state_class = SensorStateClass.MEASUREMENT
     _unrecorded_attributes = frozenset(
         {
             "electricity_rows_today",
@@ -356,14 +370,30 @@ class SpotPriceSensor(CoordinatorEntity, SensorEntity):
         self._description = description
         self._attr_name = f"{base_name} {description.name}"
         self._attr_unique_id = f"{DOMAIN}_{entry_id}_{description.key}"
+        self._attr_device_info = DeviceInfo(
+            identifiers={(DOMAIN, entry_id)},
+            name=base_name,
+            manufacturer="Elering / EEX",
+        )
+
+    @property
+    def available(self) -> bool:
+        if not super().available:
+            return False
+        if self._description.key == "gas_now":
+            fresh_at = (self.coordinator.data or {}).get("gas_fresh_at")
+            if fresh_at is None:
+                return False
+            return (time.time() - fresh_at) < GAS_STALE_SECONDS
+        return True
 
     @property
     def native_value(self) -> float | None:
-        return self.coordinator.data.get(self._description.data_key)
+        return (self.coordinator.data or {}).get(self._description.data_key)
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        data = self.coordinator.data
+        data = self.coordinator.data or {}
         attrs = {"updated_at": data.get("updated_at")}
         if self._description.key == "electricity_15min":
             attrs["electricity_rows_today"] = data.get("electricity_rows_today")

@@ -5,6 +5,8 @@ DEFAULT_AREA = "ee"
 
 ELERING_URL = "https://dashboard.elering.ee/api/nps/price/csv"
 
+# EE and LV intentionally share the same URL — they trade on the same Baltic hub (LVA-EST)
+# and publish an identical gas price.
 GAS_URL_BY_AREA: dict[str, str] = {
     "ee": "https://gasandregistry.eex.com/Gas/NGP/LVA-EST_NGP_15_Mins.csv",
     "lv": "https://gasandregistry.eex.com/Gas/NGP/LVA-EST_NGP_15_Mins.csv",
