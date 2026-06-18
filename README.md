@@ -83,7 +83,9 @@ Selecting **None** skips this step. The other two modes add a second page:
 
 ### Reconfiguring after installation
 
-Open **Settings → Devices & Services**, find the Spot Price entry and click **Configure** to change any of the above settings. HA will reload the integration automatically.
+Open **Settings → Devices & Services**, find the Spot Price entry and click **Configure** to update VAT, gas excise duty or transfer fee settings. HA will reload the integration automatically.
+
+> **Region cannot be changed after setup.** To switch region, remove the existing entry and add a new one. Multiple entries (one per region) are supported simultaneously.
 
 ## Actions
 
@@ -99,4 +101,6 @@ No parameters required.
 
 ## Using prices in automations
 
-The `electricity_rows_today` and `hourly_today` attributes on the 15-min sensor contain full day arrays, which are useful for energy automations. See the [examples/](examples/) folder for a boiler automation and a sample energy graph.
+The `electricity_rows_today` and `hourly_today` attributes on the 15-min sensor contain full day arrays, which are useful for energy automations.
+
+> **Gas Price availability:** the gas sensor reports unavailable if no fresh price has been received for more than one hour. This can happen on days when EEX publishes late or during connectivity issues. Electricity sensors retain their last known value and remain available — electricity prices are published once per day and do not change.

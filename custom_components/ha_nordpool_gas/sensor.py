@@ -202,9 +202,13 @@ async def async_setup_entry(
 
     session = async_get_clientsession(hass)
 
-    async def _fetch(url: str) -> str:
+    async def _fetch(url: str, verify_ssl: bool = True) -> str:
         try:
-            resp = await session.get(url, timeout=30)
+            timeout = aiohttp.ClientTimeout(total=30)
+            if verify_ssl:
+                resp = await session.get(url, timeout=timeout)
+            else:
+                resp = await session.get(url, timeout=timeout, ssl=False)
             resp.raise_for_status()
             return await resp.text()
         except (aiohttp.ClientError, asyncio.TimeoutError) as err:
@@ -223,9 +227,12 @@ async def async_setup_entry(
 
         elering_url = _build_elering_url(ELERING_URL, area, today, tomorrow)
 
+        # EEX does not include the intermediate CA (GlobalSign GCC R3 DV TLS CA 2020)
+        # in their TLS handshake. The leaf cert is valid, but Python on Linux cannot
+        # build the chain without it. ssl=False is the only practical workaround.
         electricity_text, gas_text = await asyncio.gather(
             _fetch(elering_url),
-            _fetch(gas_url),
+            _fetch(gas_url, verify_ssl=False),
         )
 
         # --- Electricity ---
