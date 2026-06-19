@@ -145,7 +145,7 @@ class SpotPriceConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
     def _create_entry(self) -> ConfigFlowResult:
         area = self._data.get(CONF_AREA, DEFAULT_AREA).upper()
-        return self.async_create_entry(title=f"Spot Price ({area})", data=self._data)
+        return self.async_create_entry(title=f"Nordpool & EEX Spot Prices ({area})", data=self._data)
 
     @staticmethod
     def async_get_options_flow(config_entry: config_entries.ConfigEntry) -> SpotPriceOptionsFlow:

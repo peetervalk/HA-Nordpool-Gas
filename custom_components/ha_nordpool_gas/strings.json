@@ -1,9 +1,9 @@
 {
-  "title": "Spot Price",
+  "title": "Nordpool & EEX Spot Prices",
   "config": {
     "step": {
       "user": {
-        "title": "Set up Spot Price",
+        "title": "Set up Nordpool & EEX Spot Prices",
         "data": {
           "area": "Region",
           "vat": "VAT (%)",
@@ -32,13 +32,13 @@
       }
     },
     "abort": {
-      "already_configured": "Spot Price is already configured for this region"
+      "already_configured": "Nordpool & EEX Spot Prices is already configured for this region"
     }
   },
   "options": {
     "step": {
       "init": {
-        "title": "Update Spot Price settings",
+        "title": "Update Nordpool & EEX Spot Prices settings",
         "data": {
           "vat": "VAT (%)",
           "gas_excise": "Gas excise duty (EUR/MWh)",

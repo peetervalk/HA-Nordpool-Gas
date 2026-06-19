@@ -1,3 +1,3 @@
 refresh:
   name: Refresh
-  description: Force an immediate data refresh for all Spot Price coordinator instances.
+  description: Force an immediate data refresh for all Nordpool & EEX Spot Prices coordinator instances.

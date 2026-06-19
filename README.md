@@ -1,4 +1,4 @@
-# Spot Price — Home Assistant Integration
+# Nordpool & EEX Spot Prices — Home Assistant Integration
 
 Fetches electricity and gas spot prices and exposes them as Home Assistant sensor entities.
 
@@ -34,15 +34,15 @@ All prices include VAT and any configured network transfer fees.
 
 1. In Home Assistant go to **HACS → Integrations → ⋮ → Custom repositories**
 2. Add `https://github.com/peetervalk/HA-Nordpool-Gas` as category **Integration**
-3. Search for **Spot Price** and install it
+3. Search for **Nordpool & EEX Spot Prices** and install it
 4. Restart Home Assistant
-5. Go to **Settings → Devices & Services → Add Integration**, search for **Spot Price** and follow the setup wizard
+5. Go to **Settings → Devices & Services → Add Integration**, search for **Nordpool & EEX Spot Prices** and follow the setup wizard
 
 ### Manual
 
 1. Copy `custom_components/ha_nordpool_gas/` into your HA `config/custom_components/` directory
 2. Restart Home Assistant
-3. Go to **Settings → Devices & Services → Add Integration**, search for **Spot Price**
+3. Go to **Settings → Devices & Services → Add Integration**, search for **Nordpool & EEX Spot Prices**
 
 ## Configuration
 
@@ -83,7 +83,7 @@ Selecting **None** skips this step. The other two modes add a second page:
 
 ### Reconfiguring after installation
 
-Open **Settings → Devices & Services**, find the Spot Price entry and click **Configure** to update VAT, gas excise duty or transfer fee settings. HA will reload the integration automatically.
+Open **Settings → Devices & Services**, find the Nordpool & EEX Spot Prices entry and click **Configure** to update VAT, gas excise duty or transfer fee settings. HA will reload the integration automatically.
 
 > **Region cannot be changed after setup.** To switch region, remove the existing entry and add a new one. Multiple entries (one per region) are supported simultaneously.
 
@@ -91,7 +91,7 @@ Open **Settings → Devices & Services**, find the Spot Price entry and click **
 
 ### `ha_nordpool_gas.refresh`
 
-Forces an immediate data fetch for all Spot Price instances, bypassing the normal 15-minute schedule. Useful after a connectivity issue or for automations that need an up-to-date value on demand.
+Forces an immediate data fetch for all Nordpool & EEX Spot Prices instances, bypassing the normal 15-minute schedule. Useful after a connectivity issue or for automations that need an up-to-date value on demand.
 
 ```yaml
 action: ha_nordpool_gas.refresh

@@ -1,5 +1,5 @@
 {
-  "name": "Spot Price",
+  "name": "Nordpool & EEX Spot Prices",
   "render_readme": true,
   "homeassistant": "2024.1.0"
 }
