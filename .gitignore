@@ -3,8 +3,6 @@ __pycache__/
 .vs/
 .vscode/
 .idea/
-*.txt
-samplegraph*.yaml
 
 # Ignore other assets except icon.png
 /custom_components/ha_nordpool_gas/brand/*

@@ -1,3 +1,4 @@
 {
-  "reportIncompatibleMethodOverride": "none"
+  "reportIncompatibleMethodOverride": "none",
+  "reportIncompatibleVariableOverride": "none"
 }
