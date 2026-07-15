@@ -3,6 +3,7 @@ __pycache__/
 .vs/
 .vscode/
 .idea/
+_local/
 
 # Ignore other assets except icon.png
 /custom_components/ha_nordpool_gas/brand/*
