@@ -16,7 +16,7 @@ from urllib.parse import urlencode, urlparse, urlunparse
 
 from homeassistant.components.sensor import SensorEntity, SensorStateClass
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 import homeassistant.util.dt as dt_util
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.device_registry import DeviceInfo
@@ -338,8 +338,13 @@ async def async_setup_entry(
 
     hass.data.setdefault(DOMAIN, {})
     hass.data[DOMAIN][entry.entry_id] = coordinator
+    @callback
+    def _cleanup_entry_data() -> None:
+        # Must not return a value: HA schedules any truthy return as a task.
+        hass.data.get(DOMAIN, {}).pop(entry.entry_id, None)
+
     entry.async_on_unload(cancel_quarterly)
-    entry.async_on_unload(lambda: hass.data[DOMAIN].pop(entry.entry_id, None))
+    entry.async_on_unload(_cleanup_entry_data)
 
     if not hass.services.has_service(DOMAIN, "refresh"):
         async def _handle_refresh_service(call):
