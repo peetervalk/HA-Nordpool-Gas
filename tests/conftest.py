@@ -11,7 +11,7 @@ imports sensor.py during collection).
 from __future__ import annotations
 
 import sys
-from datetime import datetime, timezone
+from datetime import date, datetime, time, timezone
 from unittest.mock import MagicMock
 from zoneinfo import ZoneInfo
 
@@ -40,6 +40,14 @@ class _FakeDtUtil:
     @staticmethod
     def now() -> datetime:
         return datetime.now(tz=timezone.utc)
+
+    @classmethod
+    def start_of_local_day(cls, dt_or_d: date | datetime | None = None) -> datetime:
+        if dt_or_d is None:
+            dt_or_d = datetime.now(cls._tz)
+        if isinstance(dt_or_d, datetime):
+            dt_or_d = dt_or_d.date()
+        return datetime.combine(dt_or_d, time(), tzinfo=cls._tz)
 
 
 # ---------------------------------------------------------------------------

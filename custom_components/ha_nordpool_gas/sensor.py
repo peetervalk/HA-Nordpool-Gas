@@ -188,6 +188,27 @@ def _rows_to_list(rows: list[tuple[datetime, float]]) -> list[list]:
     return [[int(dt.timestamp()), price] for dt, price in rows]
 
 
+def _build_gas_series(
+    gas_now: float | None, gas_tomorrow: float | None, today: date
+) -> list[list]:
+    """Return [timestamp, price] step rows at local midnight today, tomorrow and the day after.
+
+    Tomorrow falls back to today's price until it is published. The last row repeats
+    tomorrow's price so the step closes at tomorrow 24:00. Midnights come from
+    dt_util.start_of_local_day() per date, so 23h/25h DST days stay aligned.
+    """
+    if gas_now is None:
+        return []
+    tomorrow_price = gas_now if gas_tomorrow is None else gas_tomorrow
+    return _rows_to_list(
+        [
+            (dt_util.start_of_local_day(today), gas_now),
+            (dt_util.start_of_local_day(today + timedelta(days=1)), tomorrow_price),
+            (dt_util.start_of_local_day(today + timedelta(days=2)), tomorrow_price),
+        ]
+    )
+
+
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: ConfigEntry,
@@ -311,6 +332,7 @@ async def async_setup_entry(
             "electricity_hourly": electricity_hourly,
             "gas_now": gas_now,
             "gas_tomorrow": gas_tomorrow,
+            "gas_series": _build_gas_series(gas_now, gas_tomorrow, today),
             "gas_fresh_at": gas_fresh_at,
             "electricity_rows_today": _rows_to_list(today_elec_rows),
             "electricity_rows_tomorrow": _rows_to_list(tomorrow_elec_rows),
@@ -366,6 +388,7 @@ class SpotPriceSensor(CoordinatorEntity, SensorEntity):
         {
             "electricity_rows_today",
             "electricity_rows_tomorrow",
+            "gas_series",
             "hourly_today",
             "hourly_tomorrow",
         }
@@ -419,4 +442,5 @@ class SpotPriceSensor(CoordinatorEntity, SensorEntity):
             attrs["tomorrow_valid"] = data.get("tomorrow_valid")
         elif self._description.key == "gas_now":
             attrs["gas_tomorrow"] = data.get("gas_tomorrow")
+            attrs["gas_series"] = data.get("gas_series")
         return attrs

@@ -1,7 +1,8 @@
 """Unit tests for the pure (layer-1) functions in sensor.py."""
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
+from types import SimpleNamespace
 from urllib.parse import parse_qs, urlparse
 from zoneinfo import ZoneInfo
 
@@ -20,7 +21,10 @@ from custom_components.ha_nordpool_gas.const import (
     TRANSFER_MODE_NONE,
 )
 from custom_components.ha_nordpool_gas.sensor import (
+    SENSORS,
+    SpotPriceSensor,
     _build_elering_url,
+    _build_gas_series,
     _build_hourly_averages,
     _make_transfer_fn,
     _parse_electricity_csv,
@@ -364,3 +368,77 @@ def test_rows_to_list_preserves_price():
 
 def test_rows_to_list_empty():
     assert _rows_to_list([]) == []
+
+
+# ---------------------------------------------------------------------------
+# _build_gas_series
+# ---------------------------------------------------------------------------
+
+
+def test_build_gas_series_uses_gas_tomorrow_when_known():
+    series = _build_gas_series(45.5, 46.0, date(2024, 6, 15))
+
+    assert series == [
+        [_epoch(datetime(2024, 6, 15, tzinfo=TALLINN)), 45.5],
+        [_epoch(datetime(2024, 6, 16, tzinfo=TALLINN)), 46.0],
+        # End point repeats tomorrow's price to close the step at tomorrow 24:00
+        [_epoch(datetime(2024, 6, 17, tzinfo=TALLINN)), 46.0],
+    ]
+    assert all(type(ts) is int for ts, _ in series)
+
+
+def test_build_gas_series_falls_back_to_gas_now_without_tomorrow():
+    """Tomorrow is still covered so the chart's X axis reaches tomorrow 24:00."""
+    series = _build_gas_series(45.5, None, date(2024, 6, 15))
+
+    assert series == [
+        [_epoch(datetime(2024, 6, 15, tzinfo=TALLINN)), 45.5],
+        [_epoch(datetime(2024, 6, 16, tzinfo=TALLINN)), 45.5],
+        [_epoch(datetime(2024, 6, 17, tzinfo=TALLINN)), 45.5],
+    ]
+
+
+@pytest.mark.parametrize("gas_tomorrow", [None, 46.0])
+def test_build_gas_series_empty_without_gas_now(gas_tomorrow):
+    assert _build_gas_series(None, gas_tomorrow, date(2024, 6, 15)) == []
+
+
+@pytest.mark.parametrize(
+    ("today", "day_hours"),
+    [
+        (date(2026, 3, 29), (23, 24)),  # today springs forward (EET -> EEST)
+        (date(2026, 3, 28), (24, 23)),  # tomorrow springs forward
+        (date(2026, 10, 25), (25, 24)),  # today falls back (EEST -> EET)
+        (date(2026, 10, 24), (24, 25)),  # tomorrow falls back
+    ],
+)
+def test_build_gas_series_dst_rows_on_local_midnights(today, day_hours):
+    """23h/25h days must not push rows off local midnight (no fixed 24h steps)."""
+    series = _build_gas_series(45.5, 46.0, today)
+
+    local = [datetime.fromtimestamp(ts, tz=TALLINN) for ts, _ in series]
+    assert [dt.date() for dt in local] == [today + timedelta(days=n) for n in range(3)]
+    assert all(dt.time() == time(0, 0) for dt in local)
+    timestamps = [ts for ts, _ in series]
+    assert [b - a for a, b in zip(timestamps, timestamps[1:])] == [h * 3600 for h in day_hours]
+
+
+# ---------------------------------------------------------------------------
+# SpotPriceSensor.extra_state_attributes
+# ---------------------------------------------------------------------------
+
+
+def test_gas_sensor_exposes_gas_series_without_recording_it():
+    gas_description = next(d for d in SENSORS if d.key == "gas_now")
+    sensor = SpotPriceSensor(None, "entry", "Spot Price", gas_description)
+    series = _build_gas_series(45.5, 46.0, date(2024, 6, 15))
+    sensor.coordinator = SimpleNamespace(
+        data={"updated_at": 1718450000, "gas_tomorrow": 46.0, "gas_series": series}
+    )
+
+    assert sensor.extra_state_attributes == {
+        "updated_at": 1718450000,
+        "gas_tomorrow": 46.0,
+        "gas_series": series,
+    }
+    assert "gas_series" in SpotPriceSensor._unrecorded_attributes
