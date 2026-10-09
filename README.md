@@ -22,11 +22,13 @@ Three sensor entities are created per configured integration entry:
 
 | Entity | State | Attributes |
 |---|---|---|
-| `Electricity Price 15min` | Current 15-min slot price (EUR/MWh) | `electricity_rows_today`, `electricity_rows_tomorrow`, `hourly_today`, `hourly_tomorrow`, `tomorrow_valid`, `updated_at` |
-| `Electricity Price Hourly` | Hourly average of the four 15-min prices (EUR/MWh) | `hourly_today`, `hourly_tomorrow`, `tomorrow_valid`, `updated_at` |
+| `Electricity Price 15min` | Current 15-min slot price (EUR/MWh) | `electricity_rows_today`, `electricity_rows_tomorrow`, `hourly_today`, `hourly_tomorrow`, `hourly_rows_today`, `hourly_rows_tomorrow`, `tomorrow_valid`, `updated_at` |
+| `Electricity Price Hourly` | Hourly average of the four 15-min prices (EUR/MWh) | `hourly_today`, `hourly_tomorrow`, `hourly_rows_today`, `hourly_rows_tomorrow`, `tomorrow_valid`, `updated_at` |
 | `Gas Price` | Today's gas price (EUR/MWh) | `gas_tomorrow`, `gas_series`, `updated_at` |
 
 All prices include VAT and any configured network transfer fees.
+
+Hourly electricity prices come in two shapes. `hourly_today` and `hourly_tomorrow` map the hour number (0–23) to its price, which is convenient for looking up a given hour. `hourly_rows_today` and `hourly_rows_tomorrow` list `[epoch_seconds, price]` rows, one per clock hour at the start of that hour, which suits charts. On the days the clocks change, the row lists hold 23 or 25 rows. The hour-number maps have no entry for the skipped hour in spring, and in autumn their entry for the repeated hour is the average of both passes.
 
 The Gas Price sensor's `gas_series` attribute lists `[epoch_seconds, price]` rows at local midnight today, tomorrow and the day after (tomorrow uses `gas_tomorrow`, or today's price until that is published), so step charts can draw gas across a fixed 48h window ending tomorrow 24:00.
 

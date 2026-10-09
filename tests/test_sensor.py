@@ -26,6 +26,7 @@ from custom_components.ha_nordpool_gas.sensor import (
     _build_elering_url,
     _build_gas_series,
     _build_hourly_averages,
+    _build_hourly_rows,
     _current_hour_average,
     _current_slot_price,
     _make_transfer_fn,
@@ -347,6 +348,71 @@ def test_build_hourly_averages_empty():
 
 
 # ---------------------------------------------------------------------------
+# _build_hourly_rows
+# ---------------------------------------------------------------------------
+
+
+def _day_rows(day: date) -> list[tuple[datetime, float]]:
+    """Every 15-min slot of a local day, priced by the index of its real (elapsed) hour."""
+    start = _epoch(datetime.combine(day, time(), tzinfo=TALLINN))
+    end = _epoch(datetime.combine(day + timedelta(days=1), time(), tzinfo=TALLINN))
+    return [
+        (datetime.fromtimestamp(ts, tz=TALLINN), float((ts - start) // 3600))
+        for ts in range(start, end, 900)
+    ]
+
+
+def test_build_hourly_rows_one_row_per_hour_at_hour_start():
+    rows = [
+        (datetime(2024, 6, 15, 10, 0, tzinfo=TALLINN), 40.0),
+        (datetime(2024, 6, 15, 10, 15, tzinfo=TALLINN), 50.0),
+        (datetime(2024, 6, 15, 10, 30, tzinfo=TALLINN), 60.0),
+        (datetime(2024, 6, 15, 10, 45, tzinfo=TALLINN), 50.0),
+        (datetime(2024, 6, 15, 11, 0, tzinfo=TALLINN), 80.0),
+        (datetime(2024, 6, 15, 11, 15, tzinfo=TALLINN), 60.0),
+    ]
+
+    result = _build_hourly_rows(rows)
+
+    assert result == [
+        [_epoch(datetime(2024, 6, 15, 10, 0, tzinfo=TALLINN)), 50.0],
+        [_epoch(datetime(2024, 6, 15, 11, 0, tzinfo=TALLINN)), 70.0],
+    ]
+    assert all(type(ts) is int for ts, _ in result)
+
+
+def test_build_hourly_rows_matches_hourly_averages_on_a_normal_day():
+    rows = _day_rows(date(2024, 6, 15))
+
+    hourly_rows = _build_hourly_rows(rows)
+
+    assert len(hourly_rows) == 24
+    by_hour = {datetime.fromtimestamp(ts, tz=TALLINN).hour: price for ts, price in hourly_rows}
+    assert by_hour == _build_hourly_averages(rows)
+
+
+def test_build_hourly_rows_empty():
+    assert _build_hourly_rows([]) == []
+
+
+@pytest.mark.parametrize(
+    ("day", "hours"),
+    [
+        (date(2026, 3, 29), 23),  # springs forward (EET -> EEST), 03:00 is skipped
+        (date(2026, 10, 25), 25),  # falls back (EEST -> EET), 03:00 occurs twice
+    ],
+)
+def test_build_hourly_rows_dst_day_has_one_row_per_real_hour(day, hours):
+    hourly_rows = _build_hourly_rows(_day_rows(day))
+
+    timestamps = [ts for ts, _ in hourly_rows]
+    assert len(hourly_rows) == hours
+    assert [b - a for a, b in zip(timestamps, timestamps[1:])] == [3600] * (hours - 1)
+    # Each row carries its own hour's price, so the repeated hour is not merged.
+    assert [price for _, price in hourly_rows] == [float(n) for n in range(hours)]
+
+
+# ---------------------------------------------------------------------------
 # _current_slot_price / _current_hour_average
 # ---------------------------------------------------------------------------
 
@@ -573,3 +639,19 @@ def test_gas_sensor_exposes_gas_series_without_recording_it():
         "gas_series": series,
     }
     assert "gas_series" in SpotPriceSensor._unrecorded_attributes
+
+
+@pytest.mark.parametrize("key", ["electricity_15min", "electricity_hourly"])
+def test_electricity_sensors_expose_hourly_rows_without_recording_them(key):
+    description = next(d for d in SENSORS if d.key == key)
+    sensor = SpotPriceSensor(None, "entry", "Spot Price", description)
+    hourly_rows = _build_hourly_rows(_day_rows(date(2024, 6, 15)))
+    sensor.coordinator = SimpleNamespace(
+        data={"hourly_rows_today": hourly_rows, "hourly_rows_tomorrow": []}
+    )
+
+    attrs = sensor.extra_state_attributes
+
+    assert attrs["hourly_rows_today"] == hourly_rows
+    assert attrs["hourly_rows_tomorrow"] == []
+    assert {"hourly_rows_today", "hourly_rows_tomorrow"} <= SpotPriceSensor._unrecorded_attributes

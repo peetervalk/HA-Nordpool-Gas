@@ -149,6 +149,18 @@ def _build_hourly_averages(rows: list[tuple[datetime, float]]) -> dict[int, floa
     return {hour: round(sum(prices) / len(prices), 2) for hour, prices in groups.items()}
 
 
+def _build_hourly_rows(rows: list[tuple[datetime, float]]) -> list[list]:
+    """Return [timestamp, avg_price] lists, one per local clock hour of the 15-min row tuples.
+
+    Hours are keyed by the epoch of their start rather than by hour number, so a
+    23-hour DST day yields 23 rows and a 25-hour day 25, with the repeated hour kept apart.
+    """
+    groups: dict[int, list[float]] = defaultdict(list)
+    for dt, price in rows:
+        groups[int(dt.replace(minute=0, second=0, microsecond=0).timestamp())].append(price)
+    return [[hour_start, round(sum(prices) / len(prices), 2)] for hour_start, prices in groups.items()]
+
+
 def _current_slot_price(rows: list[tuple[datetime, float]], now: datetime) -> float | None:
     """Return the price of the 15-min slot containing `now`, or None if no row covers it.
 
@@ -365,6 +377,8 @@ async def async_setup_entry(
             "electricity_rows_tomorrow": _rows_to_list(tomorrow_elec_rows),
             "hourly_today": hourly_today,
             "hourly_tomorrow": hourly_tomorrow,
+            "hourly_rows_today": _build_hourly_rows(today_elec_rows),
+            "hourly_rows_tomorrow": _build_hourly_rows(tomorrow_elec_rows),
             "tomorrow_valid": len(tomorrow_elec_rows) > 0,
             "updated_at": int(now.timestamp()),
         }
@@ -416,6 +430,8 @@ class SpotPriceSensor(CoordinatorEntity, SensorEntity):
             "electricity_rows_today",
             "electricity_rows_tomorrow",
             "gas_series",
+            "hourly_rows_today",
+            "hourly_rows_tomorrow",
             "hourly_today",
             "hourly_tomorrow",
         }
@@ -462,10 +478,14 @@ class SpotPriceSensor(CoordinatorEntity, SensorEntity):
             attrs["electricity_rows_tomorrow"] = data.get("electricity_rows_tomorrow")
             attrs["hourly_today"] = data.get("hourly_today")
             attrs["hourly_tomorrow"] = data.get("hourly_tomorrow")
+            attrs["hourly_rows_today"] = data.get("hourly_rows_today")
+            attrs["hourly_rows_tomorrow"] = data.get("hourly_rows_tomorrow")
             attrs["tomorrow_valid"] = data.get("tomorrow_valid")
         elif self._description.key == "electricity_hourly":
             attrs["hourly_today"] = data.get("hourly_today")
             attrs["hourly_tomorrow"] = data.get("hourly_tomorrow")
+            attrs["hourly_rows_today"] = data.get("hourly_rows_today")
+            attrs["hourly_rows_tomorrow"] = data.get("hourly_rows_tomorrow")
             attrs["tomorrow_valid"] = data.get("tomorrow_valid")
         elif self._description.key == "gas_now":
             attrs["gas_tomorrow"] = data.get("gas_tomorrow")
