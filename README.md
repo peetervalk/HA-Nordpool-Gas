@@ -105,4 +105,4 @@ No parameters required.
 
 The `electricity_rows_today` and `hourly_today` attributes on the 15-min sensor contain full day arrays, which are useful for energy automations.
 
-> **Gas Price availability:** the gas sensor reports unavailable if no fresh price has been received for more than one hour. This can happen on days when EEX publishes late or during connectivity issues. Electricity sensors retain their last known value and remain available — electricity prices are published once per day and do not change.
+> **Gas Price availability:** the gas sensor reports unavailable if no fresh price has been received for more than one hour. This can happen on days when EEX publishes late or during connectivity issues. Electricity sensors remain available and keep using the prices already fetched for today and tomorrow — electricity prices are published once per day and do not change. If fetching keeps failing until those prices run out, the electricity sensors report `unknown` until the next successful fetch.

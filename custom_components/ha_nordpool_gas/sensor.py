@@ -149,6 +149,27 @@ def _build_hourly_averages(rows: list[tuple[datetime, float]]) -> dict[int, floa
     return {hour: round(sum(prices) / len(prices), 2) for hour, prices in groups.items()}
 
 
+def _current_slot_price(rows: list[tuple[datetime, float]], now: datetime) -> float | None:
+    """Return the price of the 15-min slot containing `now`, or None if no row covers it.
+
+    Slots are matched by epoch rather than by wall-clock hour and minute, so a row
+    from another day, or from the other pass of a repeated DST hour, cannot match.
+    """
+    slot_start = int(now.timestamp()) // 900 * 900
+    return next((price for dt, price in rows if int(dt.timestamp()) == slot_start), None)
+
+
+def _current_hour_average(rows: list[tuple[datetime, float]], now: datetime) -> float | None:
+    """Return the average price over the local clock hour containing `now`, or None.
+
+    Matched by epoch like _current_slot_price. Equals _build_hourly_averages()[now.hour]
+    except on the 25-hour DST day, where that dict merges both passes of the repeated hour.
+    """
+    hour_start = int(now.replace(minute=0, second=0, microsecond=0).timestamp())
+    prices = [price for dt, price in rows if hour_start <= int(dt.timestamp()) < hour_start + 3600]
+    return round(sum(prices) / len(prices), 2) if prices else None
+
+
 def _parse_gas_csv(
     text: str, today_str: str, tomorrow_str: str
 ) -> tuple[float | None, float | None]:
@@ -186,6 +207,28 @@ def _parse_gas_csv(
 def _rows_to_list(rows: list[tuple[datetime, float]]) -> list[list]:
     """Convert (datetime, price) tuples to serialisable [timestamp, price] lists."""
     return [[int(dt.timestamp()), price] for dt, price in rows]
+
+
+def _retained_electricity_rows(
+    prev: dict, today: date, tomorrow: date
+) -> tuple[list[tuple[datetime, float]], list[tuple[datetime, float]]]:
+    """Return (today_rows, tomorrow_rows) rebuilt from the previous update's data.
+
+    The stored rows are re-bucketed by local date instead of being reused as labelled:
+    once the day has rolled over, the previous "tomorrow" is today and the previous
+    "today" is dropped. Nothing is returned for a day the previous update did not hold.
+    """
+    today_rows: list[tuple[datetime, float]] = []
+    tomorrow_rows: list[tuple[datetime, float]] = []
+    stored = (prev.get("electricity_rows_today") or []) + (prev.get("electricity_rows_tomorrow") or [])
+    for ts, price in stored:
+        dt = dt_util.as_local(dt_util.utc_from_timestamp(ts))
+        row_date = dt.date()
+        if row_date == today:
+            today_rows.append((dt, price))
+        elif row_date == tomorrow:
+            tomorrow_rows.append((dt, price))
+    return today_rows, tomorrow_rows
 
 
 def _build_gas_series(
@@ -274,31 +317,15 @@ async def async_setup_entry(
 
         if electricity_stale:
             _LOGGER.debug("Electricity fetch yielded no data; retaining previous values")
-            today_elec_rows = [
-                (dt_util.as_local(dt_util.utc_from_timestamp(ts)), price)
-                for ts, price in (prev.get("electricity_rows_today") or [])
-            ]
-            tomorrow_elec_rows = [
-                (dt_util.as_local(dt_util.utc_from_timestamp(ts)), price)
-                for ts, price in (prev.get("electricity_rows_tomorrow") or [])
-            ]
+            today_elec_rows, tomorrow_elec_rows = _retained_electricity_rows(prev, today, tomorrow)
 
         hourly_today, hourly_tomorrow = await asyncio.gather(
             hass.async_add_executor_job(_build_hourly_averages, today_elec_rows),
             hass.async_add_executor_job(_build_hourly_averages, tomorrow_elec_rows),
         )
 
-        block_minute = (now_naive.minute // 15) * 15
-        electricity_15min = next(
-            (
-                price
-                for dt, price in today_elec_rows
-                if dt.hour == now_naive.hour and dt.minute == block_minute
-            ),
-            None,
-        )
-
-        electricity_hourly = hourly_today.get(now_naive.hour)
+        electricity_15min = _current_slot_price(today_elec_rows, now)
+        electricity_hourly = _current_hour_average(today_elec_rows, now)
 
         # --- Gas ---
         if gas_text:

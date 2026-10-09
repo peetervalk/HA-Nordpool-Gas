@@ -26,9 +26,12 @@ from custom_components.ha_nordpool_gas.sensor import (
     _build_elering_url,
     _build_gas_series,
     _build_hourly_averages,
+    _current_hour_average,
+    _current_slot_price,
     _make_transfer_fn,
     _parse_electricity_csv,
     _parse_gas_csv,
+    _retained_electricity_rows,
     _rows_to_list,
 )
 
@@ -344,6 +347,79 @@ def test_build_hourly_averages_empty():
 
 
 # ---------------------------------------------------------------------------
+# _current_slot_price / _current_hour_average
+# ---------------------------------------------------------------------------
+
+
+def _fall_back_rows() -> list[tuple[datetime, float]]:
+    """Both passes of 03:00-04:00 on 2026-10-25: 300.0 in EEST, then 400.0 in EET."""
+    return [
+        (datetime(2026, 10, 25, utc_hour, minute, tzinfo=timezone.utc).astimezone(TALLINN), price)
+        for utc_hour, price in ((0, 300.0), (1, 400.0))
+        for minute in (0, 15, 30, 45)
+    ]
+
+
+def test_current_slot_price_matches_slot_containing_now():
+    rows = [
+        (datetime(2024, 6, 15, 10, 0, tzinfo=TALLINN), 40.0),
+        (datetime(2024, 6, 15, 10, 15, tzinfo=TALLINN), 50.0),
+        (datetime(2024, 6, 15, 10, 30, tzinfo=TALLINN), 60.0),
+    ]
+
+    assert _current_slot_price(rows, datetime(2024, 6, 15, 10, 15, tzinfo=TALLINN)) == 50.0
+    assert _current_slot_price(rows, datetime(2024, 6, 15, 10, 29, 59, tzinfo=TALLINN)) == 50.0
+
+
+def test_current_slot_price_ignores_same_clock_time_on_another_day():
+    """Yesterday's 10:15 row must not be served as today's 10:15 price."""
+    rows = [(datetime(2024, 6, 14, 10, 15, tzinfo=TALLINN), 50.0)]
+
+    assert _current_slot_price(rows, datetime(2024, 6, 15, 10, 20, tzinfo=TALLINN)) is None
+
+
+def test_current_slot_price_dst_fall_back_keeps_passes_apart():
+    """03:15 occurs twice on the fall-back day; each pass has its own price."""
+    rows = _fall_back_rows()
+    first_pass = datetime(2026, 10, 25, 0, 20, tzinfo=timezone.utc).astimezone(TALLINN)
+    second_pass = datetime(2026, 10, 25, 1, 20, tzinfo=timezone.utc).astimezone(TALLINN)
+    assert (first_pass.hour, first_pass.minute) == (second_pass.hour, second_pass.minute) == (3, 20)
+
+    assert _current_slot_price(rows, first_pass) == 300.0
+    assert _current_slot_price(rows, second_pass) == 400.0
+
+
+def test_current_hour_average_uses_only_the_current_hour():
+    rows = [
+        (datetime(2024, 6, 15, 9, 45, tzinfo=TALLINN), 10.0),
+        (datetime(2024, 6, 15, 10, 0, tzinfo=TALLINN), 40.0),
+        (datetime(2024, 6, 15, 10, 15, tzinfo=TALLINN), 50.0),
+        (datetime(2024, 6, 15, 10, 30, tzinfo=TALLINN), 60.0),
+        (datetime(2024, 6, 15, 10, 45, tzinfo=TALLINN), 50.0),
+        (datetime(2024, 6, 15, 11, 0, tzinfo=TALLINN), 90.0),
+    ]
+    now = datetime(2024, 6, 15, 10, 40, tzinfo=TALLINN)
+
+    assert _current_hour_average(rows, now) == pytest.approx(50.0)
+    assert _current_hour_average(rows, now) == _build_hourly_averages(rows)[10]
+
+
+def test_current_hour_average_ignores_same_hour_on_another_day():
+    rows = [(datetime(2024, 6, 14, 10, 0, tzinfo=TALLINN), 40.0)]
+
+    assert _current_hour_average(rows, datetime(2024, 6, 15, 10, 0, tzinfo=TALLINN)) is None
+
+
+def test_current_hour_average_dst_fall_back_keeps_passes_apart():
+    rows = _fall_back_rows()
+    first_pass = datetime(2026, 10, 25, 0, 20, tzinfo=timezone.utc).astimezone(TALLINN)
+    second_pass = datetime(2026, 10, 25, 1, 20, tzinfo=timezone.utc).astimezone(TALLINN)
+
+    assert _current_hour_average(rows, first_pass) == pytest.approx(300.0)
+    assert _current_hour_average(rows, second_pass) == pytest.approx(400.0)
+
+
+# ---------------------------------------------------------------------------
 # _rows_to_list
 # ---------------------------------------------------------------------------
 
@@ -368,6 +444,61 @@ def test_rows_to_list_preserves_price():
 
 def test_rows_to_list_empty():
     assert _rows_to_list([]) == []
+
+
+# ---------------------------------------------------------------------------
+# _retained_electricity_rows
+# ---------------------------------------------------------------------------
+
+
+def _prev_data(
+    today_rows: list[tuple[datetime, float]], tomorrow_rows: list[tuple[datetime, float]]
+) -> dict:
+    """Coordinator data as a previous update would have stored it."""
+    return {
+        "electricity_rows_today": _rows_to_list(today_rows),
+        "electricity_rows_tomorrow": _rows_to_list(tomorrow_rows),
+    }
+
+
+def test_retained_electricity_rows_same_day_keeps_buckets():
+    row_15 = (datetime(2024, 6, 15, 12, 0, tzinfo=TALLINN), 50.0)
+    row_16 = (datetime(2024, 6, 16, 12, 0, tzinfo=TALLINN), 60.0)
+    prev = _prev_data([row_15], [row_16])
+
+    today_rows, tomorrow_rows = _retained_electricity_rows(prev, date(2024, 6, 15), date(2024, 6, 16))
+
+    assert today_rows == [row_15]
+    assert tomorrow_rows == [row_16]
+    assert today_rows[0][0].tzinfo is not None
+
+
+def test_retained_electricity_rows_after_midnight_promotes_tomorrow():
+    """Once the day rolls over, the stored 'tomorrow' is today and the stored 'today' is gone."""
+    row_15 = (datetime(2024, 6, 15, 0, 0, tzinfo=TALLINN), 50.0)
+    row_16 = (datetime(2024, 6, 16, 0, 0, tzinfo=TALLINN), 60.0)
+    prev = _prev_data([row_15], [row_16])
+
+    today_rows, tomorrow_rows = _retained_electricity_rows(prev, date(2024, 6, 16), date(2024, 6, 17))
+
+    assert today_rows == [row_16]
+    assert tomorrow_rows == []
+
+
+def test_retained_electricity_rows_nothing_left_after_two_midnights():
+    row_15 = (datetime(2024, 6, 15, 12, 0, tzinfo=TALLINN), 50.0)
+    row_16 = (datetime(2024, 6, 16, 12, 0, tzinfo=TALLINN), 60.0)
+    prev = _prev_data([row_15], [row_16])
+
+    assert _retained_electricity_rows(prev, date(2024, 6, 17), date(2024, 6, 18)) == ([], [])
+
+
+@pytest.mark.parametrize(
+    "prev",
+    [{}, {"electricity_rows_today": None, "electricity_rows_tomorrow": None}],
+)
+def test_retained_electricity_rows_empty_without_previous_data(prev):
+    assert _retained_electricity_rows(prev, date(2024, 6, 15), date(2024, 6, 16)) == ([], [])
 
 
 # ---------------------------------------------------------------------------
