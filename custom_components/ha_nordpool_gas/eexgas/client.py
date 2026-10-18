@@ -73,7 +73,7 @@ def parse_ngp_csv(text: str) -> list[GasDayPrice]:
     Raises EexGasResponseError when the text does not start with the NGP header,
     for example an HTML error page served with status 200.
     """
-    reader = csv.reader(io.StringIO(text.lstrip("﻿")), delimiter=";")
+    reader = csv.reader(io.StringIO(text.lstrip("\ufeff")), delimiter=";")
     header = next(reader, None)
     if not header or not header[0].strip().startswith(_HEADER_PREFIX):
         raise EexGasResponseError(f"Unexpected NGP header: {str(header)[:100]}")

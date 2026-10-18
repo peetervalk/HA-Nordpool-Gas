@@ -5,8 +5,6 @@ DEFAULT_VAT = 24.0
 DEFAULT_GAS_EXCISE = 0.0
 DEFAULT_AREA = "ee"
 
-ELERING_URL = "https://dashboard.elering.ee/api/nps/price/csv"
-
 # EE and LV intentionally share the same hub — they trade on the same Baltic hub (LVA-EST)
 # and publish an identical gas price.
 GAS_HUB_BY_AREA: dict[str, Hub] = {

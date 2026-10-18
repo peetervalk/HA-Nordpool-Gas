@@ -30,6 +30,10 @@ class _FakeDtUtil:
         cls._tz = tz
 
     @staticmethod
+    def get_time_zone(time_zone_str: str) -> ZoneInfo:
+        return ZoneInfo(time_zone_str)
+
+    @staticmethod
     def utc_from_timestamp(timestamp: float) -> datetime:
         return datetime.fromtimestamp(timestamp, tz=timezone.utc)
 
@@ -77,6 +81,14 @@ class _FakeClientError(Exception):
     """Stands in for aiohttp.ClientError: an `except` clause needs a real exception class."""
 
 
+class _FakeNordPoolError(Exception):
+    """Stands in for pynordpool.NordPoolError."""
+
+
+class _FakeNordPoolEmptyResponseError(_FakeNordPoolError):
+    """Stands in for pynordpool.NordPoolEmptyResponseError, raised for unpublished days."""
+
+
 # ---------------------------------------------------------------------------
 # Build per-module mocks
 # ---------------------------------------------------------------------------
@@ -94,6 +106,10 @@ _device_registry_mod.DeviceInfo = _FakeDeviceInfo
 
 _aiohttp_mod = MagicMock()
 _aiohttp_mod.ClientError = _FakeClientError
+
+_pynordpool_mod = MagicMock()
+_pynordpool_mod.NordPoolError = _FakeNordPoolError
+_pynordpool_mod.NordPoolEmptyResponseError = _FakeNordPoolEmptyResponseError
 
 # `import homeassistant.util.dt as dt_util` resolves via attribute chain, not
 # sys.modules key lookup, so we must wire .dt on the parent mock explicitly.
@@ -119,6 +135,7 @@ sys.modules.update(
         "homeassistant.helpers.event": MagicMock(),
         "homeassistant.helpers.update_coordinator": _coordinator_mod,
         "aiohttp": _aiohttp_mod,
+        "pynordpool": _pynordpool_mod,
     }
 )
 

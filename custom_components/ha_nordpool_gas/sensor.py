@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import csv
-import io
 import logging
 import random
 import time
@@ -12,7 +10,8 @@ from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from typing import Any, Callable
-from urllib.parse import urlencode, urlparse, urlunparse
+
+from pynordpool import Currency, NordPoolClient, NordPoolEmptyResponseError, NordPoolError
 
 from homeassistant.components.sensor import SensorEntity, SensorStateClass
 from homeassistant.config_entries import ConfigEntry
@@ -39,7 +38,6 @@ from .const import (
     DEFAULT_GAS_EXCISE,
     DEFAULT_VAT,
     DOMAIN,
-    ELERING_URL,
     GAS_HUB_BY_AREA,
     TRANSFER_MODE_DAY_NIGHT,
     TRANSFER_MODE_FIXED,
@@ -50,6 +48,9 @@ from .eexgas import EexGasClient, EexGasError, GasDayPrice
 _LOGGER = logging.getLogger(__name__)
 
 GAS_STALE_SECONDS = 3600
+
+# Nord Pool delivery days are CET/CEST dates, the same zone core's nordpool integration uses.
+NORDPOOL_TZ = dt_util.get_time_zone("Europe/Oslo")
 
 
 @dataclass(frozen=True)
@@ -66,17 +67,16 @@ SENSORS = (
 )
 
 
-def _build_elering_url(base_url: str, area: str, today: date, tomorrow: date) -> str:
-    """Append date range and area field params to the Elering CSV base URL.
+def _delivery_dates(today: date) -> list[date]:
+    """Return the Nord Pool delivery days (CET dates) that overlap local today and tomorrow.
 
-    Fetch one extra UTC day on each side so that early-morning local hours
-    (which fall in the previous UTC calendar day) are always included.
+    For Baltic and Finnish local time that is yesterday, today and tomorrow, because
+    local midnight falls at 23:00 CET on the previous day.
     """
-    parsed = urlparse(base_url)
-    start = today - timedelta(days=1)
-    end = tomorrow + timedelta(days=1)
-    query = urlencode({"start": f"{start}T00:00:00Z", "end": f"{end}T00:00:00Z", "fields": area})
-    return urlunparse(parsed._replace(query=query))
+    first = dt_util.start_of_local_day(today).astimezone(NORDPOOL_TZ).date()
+    window_end = dt_util.start_of_local_day(today + timedelta(days=2)) - timedelta(microseconds=1)
+    last = window_end.astimezone(NORDPOOL_TZ).date()
+    return [first + timedelta(days=offset) for offset in range((last - first).days + 1)]
 
 
 def _make_transfer_fn(config: dict) -> Callable[[datetime], float]:
@@ -103,33 +103,23 @@ def _make_transfer_fn(config: dict) -> Callable[[datetime], float]:
     return lambda _dt: 0.0
 
 
-def _parse_electricity_csv(
-    text: str,
+def _apply_electricity_fees(
+    entries: list[tuple[datetime, float]],
     vat: float,
     transfer_fn: Callable[[datetime], float],
     today: date,
     tomorrow: date,
 ) -> tuple[list[tuple[datetime, float]], list[tuple[datetime, float]]]:
-    """Parse Elering CSV (semicolon-delimited), return (today_rows, tomorrow_rows).
+    """Turn Nord Pool (start, EUR/MWh) entries into (today_rows, tomorrow_rows) with fees and VAT.
 
-    Columns: 'Ajatempel (UTC)' (Unix epoch UTC), a local-time string column (ignored),
-    and a price column whose name varies by area — always the last column.
-    Prices are in EUR/MWh with comma as the decimal separator.
-    Timestamps are converted per-row to HA local timezone via dt_util.as_local(),
-    which correctly handles DST transitions across the fetched window.
+    Each start is converted to HA local time via dt_util.as_local(), so rows land on
+    the right local date across DST transitions. Entries outside today and tomorrow
+    are dropped.
     """
     today_rows: list[tuple[datetime, float]] = []
     tomorrow_rows: list[tuple[datetime, float]] = []
-    reader = csv.DictReader(io.StringIO(text), delimiter=";")
-    price_col = reader.fieldnames[-1] if reader.fieldnames else None
-    if not price_col:
-        return today_rows, tomorrow_rows
-    for row in reader:
-        try:
-            dt = dt_util.as_local(dt_util.utc_from_timestamp(int(row["Ajatempel (UTC)"])))
-            price_eur_mwh = float(row[price_col].replace(",", "."))
-        except (KeyError, ValueError, TypeError, OSError):
-            continue
+    for start, price_eur_mwh in entries:
+        dt = dt_util.as_local(start)
         row_date = dt.date()
         if row_date not in (today, tomorrow):
             continue
@@ -208,26 +198,86 @@ def _rows_to_list(rows: list[tuple[datetime, float]]) -> list[list]:
     return [[int(dt.timestamp()), price] for dt, price in rows]
 
 
-def _retained_electricity_rows(
-    prev: dict, today: date, tomorrow: date
-) -> tuple[list[tuple[datetime, float]], list[tuple[datetime, float]]]:
-    """Return (today_rows, tomorrow_rows) rebuilt from the previous update's data.
+def _describe_error(err: BaseException) -> str:
+    """Return err's message, or its cause's when it has none.
 
-    The stored rows are re-bucketed by local date instead of being reused as labelled:
-    once the day has rolled over, the previous "tomorrow" is today and the previous
-    "today" is dropped. Nothing is returned for a day the previous update did not hold.
+    pynordpool raises a bare NordPoolError from the last error once its retries run out.
     """
-    today_rows: list[tuple[datetime, float]] = []
-    tomorrow_rows: list[tuple[datetime, float]] = []
-    stored = (prev.get("electricity_rows_today") or []) + (prev.get("electricity_rows_tomorrow") or [])
-    for ts, price in stored:
-        dt = dt_util.as_local(dt_util.utc_from_timestamp(ts))
-        row_date = dt.date()
-        if row_date == today:
-            today_rows.append((dt, price))
-        elif row_date == tomorrow:
-            tomorrow_rows.append((dt, price))
-    return today_rows, tomorrow_rows
+    if str(err):
+        return str(err)
+    if err.__cause__ is not None:
+        return _describe_error(err.__cause__)
+    return type(err).__name__
+
+
+class _FetchLog:
+    """Log a failing price source once when it starts failing and once when it recovers."""
+
+    def __init__(self, source: str) -> None:
+        self._source = source
+        self._failing = False
+
+    def failure(self, err: BaseException) -> None:
+        if self._failing:
+            _LOGGER.debug("%s fetch still failing: %s", self._source, _describe_error(err))
+        else:
+            _LOGGER.warning(
+                "%s fetch failed, keeping the last known prices: %s", self._source, _describe_error(err)
+            )
+        self._failing = True
+
+    def success(self) -> None:
+        if self._failing:
+            _LOGGER.info("%s fetch recovered", self._source)
+        self._failing = False
+
+
+class _ElectricityPrices:
+    """Nord Pool day-ahead prices for one area, held per delivery day (CET date).
+
+    A delivery day is fetched on every update until Nord Pool has published final
+    prices for it, and is served from memory after that. Days no longer asked for are
+    dropped. A failed fetch keeps the days already held, and because local rows are
+    rebuilt from them on every update, they stay correct across local midnight.
+    """
+
+    def __init__(self, client: NordPoolClient, area: str) -> None:
+        self._client = client
+        self._area = area
+        self._days: dict[date, list[tuple[datetime, float]]] = {}
+        self._final: set[date] = set()
+        self._log = _FetchLog("Electricity price")
+
+    async def async_entries(self, days: list[date]) -> list[tuple[datetime, float]]:
+        """Return (start, EUR/MWh) entries for the given delivery days, in day order."""
+        for day in [day for day in self._days if day not in days]:
+            del self._days[day]
+            self._final.discard(day)
+        to_fetch = [day for day in days if day not in self._final]
+        if to_fetch:
+            errors = [err for err in await asyncio.gather(*map(self._async_fetch, to_fetch)) if err]
+            if errors:
+                self._log.failure(errors[0])
+            else:
+                self._log.success()
+        return [entry for day in days for entry in self._days.get(day, [])]
+
+    async def _async_fetch(self, day: date) -> Exception | None:
+        """Fetch one delivery day into memory; return the error if the fetch failed."""
+        try:
+            data = await self._client.async_get_delivery_period(
+                datetime(day.year, day.month, day.day), Currency.EUR, [self._area]
+            )
+        except NordPoolEmptyResponseError:
+            return None  # not published yet
+        except (NordPoolError, aiohttp.ClientError, TimeoutError) as err:
+            return err
+        self._days[day] = [
+            (entry.start, entry.entry[self._area]) for entry in data.entries if self._area in entry.entry
+        ]
+        if data.prices_final:
+            self._final.add(day)
+        return None
 
 
 def _build_gas_series(
@@ -264,33 +314,17 @@ async def async_setup_entry(
     transfer_fn = _make_transfer_fn(config)
 
     session = async_get_clientsession(hass)
+    electricity = _ElectricityPrices(NordPoolClient(session), area.upper())
     gas_client = EexGasClient(session)
-    gas_failing = False
-
-    async def _fetch(url: str) -> str:
-        try:
-            resp = await session.get(url, timeout=aiohttp.ClientTimeout(total=30))
-            resp.raise_for_status()
-            return await resp.text()
-        except (aiohttp.ClientError, asyncio.TimeoutError) as err:
-            _LOGGER.error("Error fetching %s: %s", url, err)
-            return ""
+    gas_log = _FetchLog("Gas price")
 
     async def _fetch_gas() -> list[GasDayPrice]:
-        """Fetch EEX rows, logging a failure once when it starts and once when it clears."""
-        nonlocal gas_failing
         try:
             prices = await gas_client.async_get_prices(gas_hub)
         except EexGasError as err:
-            if gas_failing:
-                _LOGGER.debug("Gas price fetch still failing: %s", err)
-            else:
-                _LOGGER.warning("Gas price fetch failed, keeping the last known price: %s", err)
-            gas_failing = True
+            gas_log.failure(err)
             return []
-        if gas_failing:
-            _LOGGER.info("Gas price fetch recovered")
-            gas_failing = False
+        gas_log.success()
         return prices
 
     async def _async_update_data():
@@ -301,32 +335,15 @@ async def async_setup_entry(
 
         prev = coordinator.data or {}
 
-        elering_url = _build_elering_url(ELERING_URL, area, today, tomorrow)
-
-        electricity_text, gas_prices = await asyncio.gather(
-            _fetch(elering_url),
+        electricity_entries, gas_prices = await asyncio.gather(
+            electricity.async_entries(_delivery_dates(today)),
             _fetch_gas(),
         )
 
         # --- Electricity ---
-        if electricity_text:
-            today_elec_rows, tomorrow_elec_rows = await hass.async_add_executor_job(
-                _parse_electricity_csv,
-                electricity_text,
-                vat,
-                transfer_fn,
-                today,
-                tomorrow,
-            )
-            electricity_stale = not today_elec_rows
-        else:
-            today_elec_rows = []
-            tomorrow_elec_rows = []
-            electricity_stale = True
-
-        if electricity_stale:
-            _LOGGER.debug("Electricity fetch yielded no data; retaining previous values")
-            today_elec_rows, tomorrow_elec_rows = _retained_electricity_rows(prev, today, tomorrow)
+        today_elec_rows, tomorrow_elec_rows = _apply_electricity_fees(
+            electricity_entries, vat, transfer_fn, today, tomorrow
+        )
 
         hourly_today, hourly_tomorrow = await asyncio.gather(
             hass.async_add_executor_job(_build_hourly_averages, today_elec_rows),
@@ -442,7 +459,7 @@ class SpotPriceSensor(CoordinatorEntity, SensorEntity):
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, entry_id)},
             name=base_name,
-            manufacturer="Elering / EEX",
+            manufacturer="Nord Pool / EEX",
         )
 
     @property

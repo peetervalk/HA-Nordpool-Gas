@@ -2,19 +2,19 @@
 
 Fetches electricity and gas spot prices and exposes them as Home Assistant sensor entities.
 
-**Electricity** is fetched from the [Elering NPS price API](https://dashboard.elering.ee/assets/swagger-ui/index.html#/nps-controller/getPriceAsCSV) at 15-minute resolution.
+**Electricity** day-ahead prices come from the [Nord Pool data portal](https://data.nordpoolgroup.com/auction/day-ahead/prices) at 15-minute resolution, through [pynordpool](https://github.com/gjohansson-ST/pynordpool), the library Home Assistant's built-in Nord Pool integration uses.
 **Gas** is fetched from the [EEX NGP daily CSV](https://www.eex.com/en/market-data/market-data-hub/natural-gas/indices) — the correct file is selected automatically based on the configured region.
 
-Both today's and tomorrow's prices are fetched on every update. Sensors refresh at **:00, :15, :30 and :45** each hour.
+Sensors refresh at **:00, :15, :30 and :45** each hour. Gas prices are fetched on every refresh, because EEX updates them during the day. Electricity prices are fetched for each day until Nord Pool has published final prices for it, then reused; tomorrow's prices are usually published around 13:00 CET.
 
 ## Supported regions
 
 | Region | Electricity source | Gas source |
 |---|---|---|
-| Estonia (`ee`) | Elering NPS | EEX LVA-EST NGP |
-| Latvia (`lv`) | Elering NPS | EEX LVA-EST NGP |
-| Finland (`fi`) | Elering NPS | EEX FIN NGP |
-| Lithuania (`lt`) | Elering NPS | EEX LTU NGP |
+| Estonia (`ee`) | Nord Pool EE | EEX LVA-EST NGP |
+| Latvia (`lv`) | Nord Pool LV | EEX LVA-EST NGP |
+| Finland (`fi`) | Nord Pool FI | EEX FIN NGP |
+| Lithuania (`lt`) | Nord Pool LT | EEX LTU NGP |
 
 ## Entities
 

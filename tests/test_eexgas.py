@@ -25,7 +25,7 @@ HEADER = "Gasday;IndexValue (€/MWh);IndexVolume (MWh);Status;Timestamp (CET/CE
 
 # LVA-EST_NGP_15_Mins.csv as served on 2026-10-18 (UTF-8 with BOM, LF line endings).
 REAL_FILE = (
-    "﻿" + HEADER + "\n"
+    "\ufeff" + HEADER + "\n"
     "17/10/2026;87.661;9684;Final NGP;18/10/2026 22:45\n"
     "18/10/2026;87.957;6233;Temporary NGP;18/10/2026 22:45\n"
     "19/10/2026;88.374;1945;Temporary NGP;18/10/2026 22:45\n"
@@ -34,7 +34,7 @@ REAL_FILE = (
 # LTU_NGP_15_Mins.csv as served on 2026-10-18: band and marginal price columns sit
 # between the price and Status, and the day after tomorrow is a zero placeholder row.
 REAL_LTU_FILE = (
-    "﻿Gasday;LTU NGP (€/MWh);LTU NGP -10% (€/MWh);LTU NGP +10% (€/MWh);IndexVolume (MWh);"
+    "\ufeffGasday;LTU NGP (€/MWh);LTU NGP -10% (€/MWh);LTU NGP +10% (€/MWh);IndexVolume (MWh);"
     "LTU Marginal Buy Price (€/MWh);LTU Marginal Sell Price (€/MWh);Status;Timestamp (CET/CEST)\n"
     "17/10/2026;86.856;78.17;95.542;7278;95.542;78.17;Final NGP;18/10/2026 23:00\n"
     "20/10/2026;0;0;0;0;0;0;Temporary NGP;18/10/2026 23:00\n"
@@ -138,7 +138,7 @@ def test_parse_ngp_csv_rejects_text_that_is_not_an_ngp_file(text):
 
 @pytest.mark.parametrize("encoding", ["utf-8-sig", "utf-8", "cp1252"])
 def test_decode_handles_each_encoding_eex_has_served(encoding):
-    body = REAL_FILE.lstrip("﻿").encode(encoding)
+    body = REAL_FILE.lstrip("\ufeff").encode(encoding)
     text = _decode(body)
     assert "€" in text
     assert parse_ngp_csv(text) == parse_ngp_csv(REAL_FILE)

@@ -1,12 +1,17 @@
 """Unit tests for the pure (layer-1) functions in sensor.py."""
 from __future__ import annotations
 
+import asyncio
+import logging
 from datetime import date, datetime, time, timedelta, timezone
 from types import SimpleNamespace
-from urllib.parse import parse_qs, urlparse
 from zoneinfo import ZoneInfo
 
+import aiohttp
 import pytest
+from pynordpool import NordPoolEmptyResponseError, NordPoolError
+
+import homeassistant.util.dt as dt_util
 
 from custom_components.ha_nordpool_gas.const import (
     CONF_TRANSFER_DAY,
@@ -23,15 +28,16 @@ from custom_components.ha_nordpool_gas.const import (
 from custom_components.ha_nordpool_gas.sensor import (
     SENSORS,
     SpotPriceSensor,
-    _build_elering_url,
+    _apply_electricity_fees,
     _build_gas_series,
     _build_hourly_averages,
     _build_hourly_rows,
     _current_hour_average,
     _current_slot_price,
+    _delivery_dates,
+    _describe_error,
+    _ElectricityPrices,
     _make_transfer_fn,
-    _parse_electricity_csv,
-    _retained_electricity_rows,
     _rows_to_list,
     _select_gas_prices,
 )
@@ -41,16 +47,13 @@ TALLINN = ZoneInfo("Europe/Tallinn")
 
 
 # ---------------------------------------------------------------------------
-# CSV helpers
+# Data helpers
 # ---------------------------------------------------------------------------
 
 
-def _elec_csv(*rows: tuple[int, float]) -> str:
-    """Minimal Elering-style CSV: epoch, ignored local-time column, price."""
-    lines = ["Ajatempel (UTC);LocalTime;ee (EUR/MWh)"]
-    for epoch, price in rows:
-        lines.append(f"{epoch};ignored;{str(price).replace('.', ',')}")
-    return "\n".join(lines)
+def _entry(local_dt: datetime, price: float) -> tuple[datetime, float]:
+    """A Nord Pool (start, EUR/MWh) entry; pynordpool gives starts as UTC datetimes."""
+    return (local_dt.astimezone(timezone.utc), price)
 
 
 def _gas_rows(*rows: tuple[date, float]) -> list[GasDayPrice]:
@@ -63,34 +66,35 @@ def _epoch(dt_aware: datetime) -> int:
 
 
 # ---------------------------------------------------------------------------
-# _build_elering_url
+# _delivery_dates
 # ---------------------------------------------------------------------------
 
 
-def test_build_elering_url_pads_one_day_each_side():
-    url = _build_elering_url(
-        "https://example.com/csv", "ee", date(2024, 6, 15), date(2024, 6, 16)
-    )
-    params = parse_qs(urlparse(url).query)
-    assert params["fields"] == ["ee"]
-    # start = today - 1
-    assert params["start"][0].startswith("2024-06-14")
-    # end = tomorrow + 1
-    assert params["end"][0].startswith("2024-06-17")
+@pytest.mark.parametrize(
+    "today",
+    [
+        date(2026, 10, 19),  # EEST
+        date(2026, 10, 25),  # clocks go back: 25-hour local day
+        date(2026, 3, 29),  # clocks go forward: 23-hour local day
+        date(2026, 1, 15),  # EET
+    ],
+)
+def test_delivery_dates_tallinn_spans_yesterday_to_tomorrow(today):
+    """Local midnight in Tallinn is 23:00 CET the day before, so yesterday's CET day is needed."""
+    assert _delivery_dates(today) == [today - timedelta(days=1), today, today + timedelta(days=1)]
 
 
-def test_build_elering_url_preserves_base():
-    url = _build_elering_url(
-        "https://dashboard.elering.ee/api/nps/price/csv",
-        "lv",
-        date(2024, 1, 1),
-        date(2024, 1, 2),
-    )
-    parsed = urlparse(url)
-    assert parsed.scheme == "https"
-    assert parsed.netloc == "dashboard.elering.ee"
-    assert parsed.path == "/api/nps/price/csv"
-    assert parse_qs(parsed.query)["fields"] == ["lv"]
+def test_delivery_dates_west_of_cet_spans_today_to_day_after_tomorrow():
+    """In London local tomorrow ends at 01:00 CET the day after, which needs that CET day too."""
+    dt_util.set_default_time_zone(ZoneInfo("Europe/London"))
+    today = date(2026, 10, 19)
+    assert _delivery_dates(today) == [today, today + timedelta(days=1), today + timedelta(days=2)]
+
+
+def test_delivery_dates_in_cet_are_today_and_tomorrow():
+    dt_util.set_default_time_zone(ZoneInfo("Europe/Oslo"))
+    today = date(2026, 10, 19)
+    assert _delivery_dates(today) == [today, today + timedelta(days=1)]
 
 
 # ---------------------------------------------------------------------------
@@ -225,91 +229,108 @@ def test_select_gas_prices_no_rows():
 
 
 # ---------------------------------------------------------------------------
-# _parse_electricity_csv
+# _apply_electricity_fees
 # ---------------------------------------------------------------------------
 
 
-def test_parse_electricity_csv_vat_applied():
+def test_apply_electricity_fees_vat_applied():
     today = date(2024, 6, 15)
-    epoch = _epoch(datetime(2024, 6, 15, 12, 0, tzinfo=TALLINN))
-    text = _elec_csv((epoch, 50.0))
+    entries = [_entry(datetime(2024, 6, 15, 12, 0, tzinfo=TALLINN), 50.0)]
     no_transfer = _make_transfer_fn({CONF_TRANSFER_MODE: TRANSFER_MODE_NONE})
 
-    today_rows, _ = _parse_electricity_csv(text, 22.0, no_transfer, today, today + timedelta(days=1))
+    today_rows, _ = _apply_electricity_fees(entries, 22.0, no_transfer, today, today + timedelta(days=1))
 
     assert len(today_rows) == 1
     # 50.0 * 1.22 = 61.0
     assert today_rows[0][1] == pytest.approx(61.0)
 
 
-def test_parse_electricity_csv_transfer_fee_applied():
+def test_apply_electricity_fees_transfer_fee_applied():
     today = date(2024, 6, 15)
-    epoch = _epoch(datetime(2024, 6, 15, 14, 0, tzinfo=TALLINN))
-    text = _elec_csv((epoch, 50.0))
+    entries = [_entry(datetime(2024, 6, 15, 14, 0, tzinfo=TALLINN), 50.0)]
     fixed_transfer = _make_transfer_fn(
         {CONF_TRANSFER_MODE: TRANSFER_MODE_FIXED, CONF_TRANSFER_FIXED: 5.0}
     )
 
-    today_rows, _ = _parse_electricity_csv(text, 22.0, fixed_transfer, today, today + timedelta(days=1))
+    today_rows, _ = _apply_electricity_fees(entries, 22.0, fixed_transfer, today, today + timedelta(days=1))
 
     # (50 + 5) * 1.22 = 67.1
     assert today_rows[0][1] == pytest.approx(67.1)
 
 
-def test_parse_electricity_csv_today_and_tomorrow_split():
+def test_apply_electricity_fees_today_and_tomorrow_split():
     today = date(2024, 6, 15)
     tomorrow = date(2024, 6, 16)
-    epoch_today = _epoch(datetime(2024, 6, 15, 12, 0, tzinfo=TALLINN))
-    epoch_tomorrow = _epoch(datetime(2024, 6, 16, 12, 0, tzinfo=TALLINN))
-    text = _elec_csv((epoch_today, 50.0), (epoch_tomorrow, 60.0))
+    entries = [
+        _entry(datetime(2024, 6, 15, 12, 0, tzinfo=TALLINN), 50.0),
+        _entry(datetime(2024, 6, 16, 12, 0, tzinfo=TALLINN), 60.0),
+    ]
     no_transfer = _make_transfer_fn({CONF_TRANSFER_MODE: TRANSFER_MODE_NONE})
 
-    today_rows, tomorrow_rows = _parse_electricity_csv(text, 0.0, no_transfer, today, tomorrow)
+    today_rows, tomorrow_rows = _apply_electricity_fees(entries, 0.0, no_transfer, today, tomorrow)
 
     assert len(today_rows) == 1
     assert len(tomorrow_rows) == 1
 
 
-def test_parse_electricity_csv_midnight_row_classified_as_local_date():
+def test_apply_electricity_fees_midnight_row_classified_as_local_date():
     """00:15 local time is 21:15 UTC the previous calendar day.
     The row must be classified by local date, not UTC date."""
     today = date(2024, 6, 15)
     # 00:15 EEST on 2024-06-15 = 21:15 UTC on 2024-06-14
-    epoch = _epoch(datetime(2024, 6, 15, 0, 15, tzinfo=TALLINN))
-    text = _elec_csv((epoch, 50.0))
+    entries = [_entry(datetime(2024, 6, 15, 0, 15, tzinfo=TALLINN), 50.0)]
     no_transfer = _make_transfer_fn({CONF_TRANSFER_MODE: TRANSFER_MODE_NONE})
 
-    today_rows, tomorrow_rows = _parse_electricity_csv(
-        text, 0.0, no_transfer, today, today + timedelta(days=1)
+    today_rows, tomorrow_rows = _apply_electricity_fees(
+        entries, 0.0, no_transfer, today, today + timedelta(days=1)
     )
 
     assert len(today_rows) == 1, "00:15 local should be today, not skipped as UTC-previous-day"
     assert len(tomorrow_rows) == 0
 
 
-def test_parse_electricity_csv_rows_are_timezone_aware():
+def test_apply_electricity_fees_rows_are_local_and_timezone_aware():
     """Returned datetimes must be timezone-aware (not naive) for correct timestamp serialisation."""
     today = date(2024, 6, 15)
-    epoch = _epoch(datetime(2024, 6, 15, 12, 0, tzinfo=TALLINN))
-    text = _elec_csv((epoch, 50.0))
+    entries = [_entry(datetime(2024, 6, 15, 12, 0, tzinfo=TALLINN), 50.0)]
     no_transfer = _make_transfer_fn({CONF_TRANSFER_MODE: TRANSFER_MODE_NONE})
 
-    today_rows, _ = _parse_electricity_csv(text, 0.0, no_transfer, today, today + timedelta(days=1))
+    today_rows, _ = _apply_electricity_fees(entries, 0.0, no_transfer, today, today + timedelta(days=1))
 
     dt, _ = today_rows[0]
     assert dt.tzinfo is not None
     assert dt.hour == 12
 
 
-def test_parse_electricity_csv_out_of_range_rows_discarded():
+def test_apply_electricity_fees_transfer_fn_sees_local_time():
+    """Day/night tariffs depend on the local hour, not the UTC hour Nord Pool reports."""
+    today = date(2024, 6, 17)  # Monday
+    entries = [_entry(datetime(2024, 6, 17, 7, 0, tzinfo=TALLINN), 50.0)]  # 04:00 UTC
+    day_night = _make_transfer_fn(
+        {
+            CONF_TRANSFER_MODE: TRANSFER_MODE_DAY_NIGHT,
+            CONF_TRANSFER_DAY: 10.0,
+            CONF_TRANSFER_NIGHT: 1.0,
+            CONF_TRANSFER_DAY_START: 7,
+            CONF_TRANSFER_DAY_END: 22,
+        }
+    )
+
+    today_rows, _ = _apply_electricity_fees(entries, 0.0, day_night, today, today + timedelta(days=1))
+
+    assert today_rows[0][1] == pytest.approx(60.0)
+
+
+def test_apply_electricity_fees_out_of_range_rows_discarded():
     today = date(2024, 6, 15)
     tomorrow = date(2024, 6, 16)
-    epoch_past = _epoch(datetime(2024, 6, 14, 12, 0, tzinfo=TALLINN))
-    epoch_future = _epoch(datetime(2024, 6, 17, 12, 0, tzinfo=TALLINN))
-    text = _elec_csv((epoch_past, 40.0), (epoch_future, 80.0))
+    entries = [
+        _entry(datetime(2024, 6, 14, 12, 0, tzinfo=TALLINN), 40.0),
+        _entry(datetime(2024, 6, 17, 12, 0, tzinfo=TALLINN), 80.0),
+    ]
     no_transfer = _make_transfer_fn({CONF_TRANSFER_MODE: TRANSFER_MODE_NONE})
 
-    today_rows, tomorrow_rows = _parse_electricity_csv(text, 0.0, no_transfer, today, tomorrow)
+    today_rows, tomorrow_rows = _apply_electricity_fees(entries, 0.0, no_transfer, today, tomorrow)
 
     assert len(today_rows) == 0
     assert len(tomorrow_rows) == 0
@@ -514,58 +535,176 @@ def test_rows_to_list_empty():
 
 
 # ---------------------------------------------------------------------------
-# _retained_electricity_rows
+# _ElectricityPrices
 # ---------------------------------------------------------------------------
 
-
-def _prev_data(
-    today_rows: list[tuple[datetime, float]], tomorrow_rows: list[tuple[datetime, float]]
-) -> dict:
-    """Coordinator data as a previous update would have stored it."""
-    return {
-        "electricity_rows_today": _rows_to_list(today_rows),
-        "electricity_rows_tomorrow": _rows_to_list(tomorrow_rows),
-    }
+AREA = "EE"
+CET = ZoneInfo("Europe/Oslo")
+D17, D18, D19, D20 = (date(2026, 10, day) for day in (17, 18, 19, 20))
+SENSOR_LOGGER = "custom_components.ha_nordpool_gas.sensor"
 
 
-def test_retained_electricity_rows_same_day_keeps_buckets():
-    row_15 = (datetime(2024, 6, 15, 12, 0, tzinfo=TALLINN), 50.0)
-    row_16 = (datetime(2024, 6, 16, 12, 0, tzinfo=TALLINN), 60.0)
-    prev = _prev_data([row_15], [row_16])
-
-    today_rows, tomorrow_rows = _retained_electricity_rows(prev, date(2024, 6, 15), date(2024, 6, 16))
-
-    assert today_rows == [row_15]
-    assert tomorrow_rows == [row_16]
-    assert today_rows[0][0].tzinfo is not None
+def _period(day: date, prices: list[float], final: bool = True, area: str = AREA) -> SimpleNamespace:
+    """A pynordpool DeliveryPeriodData stand-in: 15-min entries from CET midnight of `day`."""
+    start = datetime.combine(day, time(), tzinfo=CET).astimezone(timezone.utc)
+    entries = [
+        SimpleNamespace(start=start + timedelta(minutes=15 * i), entry={area: price})
+        for i, price in enumerate(prices)
+    ]
+    return SimpleNamespace(entries=entries, prices_final=final)
 
 
-def test_retained_electricity_rows_after_midnight_promotes_tomorrow():
-    """Once the day rolls over, the stored 'tomorrow' is today and the stored 'today' is gone."""
-    row_15 = (datetime(2024, 6, 15, 0, 0, tzinfo=TALLINN), 50.0)
-    row_16 = (datetime(2024, 6, 16, 0, 0, tzinfo=TALLINN), 60.0)
-    prev = _prev_data([row_15], [row_16])
+class _FakeNordPoolClient:
+    """Answers each delivery day from `results`, a {date: period or exception} map.
 
-    today_rows, tomorrow_rows = _retained_electricity_rows(prev, date(2024, 6, 16), date(2024, 6, 17))
+    Days missing from the map answer as unpublished, like Nord Pool's HTTP 204.
+    """
 
-    assert today_rows == [row_16]
-    assert tomorrow_rows == []
+    def __init__(self, results: dict) -> None:
+        self.results = results
+        self.requested: list[date] = []
+
+    async def async_get_delivery_period(self, target_date, currency, areas):
+        day = target_date.date()
+        self.requested.append(day)
+        result = self.results.get(day, NordPoolEmptyResponseError("Empty response"))
+        if isinstance(result, BaseException):
+            raise result
+        return result
 
 
-def test_retained_electricity_rows_nothing_left_after_two_midnights():
-    row_15 = (datetime(2024, 6, 15, 12, 0, tzinfo=TALLINN), 50.0)
-    row_16 = (datetime(2024, 6, 16, 12, 0, tzinfo=TALLINN), 60.0)
-    prev = _prev_data([row_15], [row_16])
+def _get_prices(electricity: _ElectricityPrices, days: list[date]) -> list[float]:
+    return [price for _, price in asyncio.run(electricity.async_entries(days))]
 
-    assert _retained_electricity_rows(prev, date(2024, 6, 17), date(2024, 6, 18)) == ([], [])
+
+def test_electricity_prices_fetches_every_day_and_returns_entries_in_day_order():
+    client = _FakeNordPoolClient(
+        {D17: _period(D17, [1.0, 2.0]), D18: _period(D18, [3.0]), D19: _period(D19, [4.0])}
+    )
+    electricity = _ElectricityPrices(client, AREA)
+
+    assert _get_prices(electricity, [D17, D18, D19]) == [1.0, 2.0, 3.0, 4.0]
+    assert sorted(client.requested) == [D17, D18, D19]
+
+
+def test_electricity_prices_entries_start_at_utc_instants():
+    client = _FakeNordPoolClient({D19: _period(D19, [4.0])})
+    electricity = _ElectricityPrices(client, AREA)
+
+    ((start, _),) = asyncio.run(electricity.async_entries([D19]))
+
+    assert start == datetime(2026, 10, 18, 22, 0, tzinfo=timezone.utc)  # 00:00 CEST
+
+
+def test_electricity_prices_final_days_are_not_fetched_again():
+    client = _FakeNordPoolClient({D18: _period(D18, [3.0]), D19: _period(D19, [4.0])})
+    electricity = _ElectricityPrices(client, AREA)
+    _get_prices(electricity, [D18, D19])
+    client.requested.clear()
+
+    assert _get_prices(electricity, [D18, D19]) == [3.0, 4.0]
+    assert client.requested == []
+
+
+def test_electricity_prices_preliminary_day_is_used_and_fetched_again():
+    client = _FakeNordPoolClient({D19: _period(D19, [4.0], final=False)})
+    electricity = _ElectricityPrices(client, AREA)
+    assert _get_prices(electricity, [D19]) == [4.0]
+
+    client.results[D19] = _period(D19, [4.5])
+    assert _get_prices(electricity, [D19]) == [4.5]
+
+    client.requested.clear()
+    _get_prices(electricity, [D19])
+    assert client.requested == []
+
+
+def test_electricity_prices_unpublished_day_is_asked_again_without_logging(caplog):
+    caplog.set_level(logging.DEBUG, logger=SENSOR_LOGGER)
+    client = _FakeNordPoolClient({D19: _period(D19, [4.0])})
+    electricity = _ElectricityPrices(client, AREA)
+    _get_prices(electricity, [D19, D20])
+    client.requested.clear()
+
+    assert _get_prices(electricity, [D19, D20]) == [4.0]
+    assert client.requested == [D20]
+    assert [r for r in caplog.records if r.name == SENSOR_LOGGER] == []
 
 
 @pytest.mark.parametrize(
-    "prev",
-    [{}, {"electricity_rows_today": None, "electricity_rows_tomorrow": None}],
+    "error",
+    [NordPoolError(), aiohttp.ClientError("Connection reset by peer"), TimeoutError()],
+    ids=["nordpool", "aiohttp", "timeout"],
 )
-def test_retained_electricity_rows_empty_without_previous_data(prev):
-    assert _retained_electricity_rows(prev, date(2024, 6, 15), date(2024, 6, 16)) == ([], [])
+def test_electricity_prices_failed_fetch_keeps_days_already_held(error):
+    client = _FakeNordPoolClient({D18: _period(D18, [3.0]), D19: _period(D19, [4.0], final=False)})
+    electricity = _ElectricityPrices(client, AREA)
+    _get_prices(electricity, [D18, D19])
+
+    client.results = {D19: error, D20: error}
+
+    assert _get_prices(electricity, [D18, D19, D20]) == [3.0, 4.0]
+
+
+def test_electricity_prices_after_midnight_held_days_carry_over_and_old_days_drop():
+    """A failed fetch at midnight still leaves the previous 'tomorrow' to serve as today."""
+    client = _FakeNordPoolClient({day: _period(day, [float(day.day)]) for day in (D17, D18, D19)})
+    electricity = _ElectricityPrices(client, AREA)
+    _get_prices(electricity, [D17, D18, D19])
+    client.results = {D20: NordPoolError()}
+    client.requested.clear()
+
+    assert _get_prices(electricity, [D18, D19, D20]) == [18.0, 19.0]
+    assert client.requested == [D20]
+
+    # D17 was dropped, so asking for it again fetches it
+    client.requested.clear()
+    _get_prices(electricity, [D17])
+    assert client.requested == [D17]
+
+
+def test_electricity_prices_ignores_entries_for_other_areas():
+    client = _FakeNordPoolClient({D19: _period(D19, [4.0], area="FI")})
+    electricity = _ElectricityPrices(client, AREA)
+
+    assert _get_prices(electricity, [D19]) == []
+
+
+def test_electricity_prices_logs_a_failure_once_and_its_recovery(caplog):
+    caplog.set_level(logging.DEBUG, logger=SENSOR_LOGGER)
+    client = _FakeNordPoolClient({D19: NordPoolError("API error: 503")})
+    electricity = _ElectricityPrices(client, AREA)
+
+    _get_prices(electricity, [D19])
+    _get_prices(electricity, [D19])
+    client.results = {D19: _period(D19, [4.0])}
+    _get_prices(electricity, [D19])
+
+    assert [(r.levelno, r.getMessage()) for r in caplog.records if r.name == SENSOR_LOGGER] == [
+        (logging.WARNING, "Electricity price fetch failed, keeping the last known prices: API error: 503"),
+        (logging.DEBUG, "Electricity price fetch still failing: API error: 503"),
+        (logging.INFO, "Electricity price fetch recovered"),
+    ]
+
+
+# ---------------------------------------------------------------------------
+# _describe_error
+# ---------------------------------------------------------------------------
+
+
+def test_describe_error_uses_the_message():
+    assert _describe_error(ValueError("boom")) == "boom"
+
+
+def test_describe_error_falls_back_to_the_cause():
+    """pynordpool raises a bare NordPoolError from the last error once its retries run out."""
+    err = NordPoolError()
+    err.__cause__ = aiohttp.ClientError("Connection reset by peer")
+    assert _describe_error(err) == "Connection reset by peer"
+
+
+def test_describe_error_falls_back_to_the_type_name():
+    assert _describe_error(TimeoutError()) == "TimeoutError"
 
 
 # ---------------------------------------------------------------------------
