@@ -73,6 +73,10 @@ class _FakeDeviceInfo(dict):
         super().__init__(**kwargs)
 
 
+class _FakeClientError(Exception):
+    """Stands in for aiohttp.ClientError: an `except` clause needs a real exception class."""
+
+
 # ---------------------------------------------------------------------------
 # Build per-module mocks
 # ---------------------------------------------------------------------------
@@ -87,6 +91,9 @@ _coordinator_mod.DataUpdateCoordinator = _CoordinatorEntityBase
 
 _device_registry_mod = MagicMock()
 _device_registry_mod.DeviceInfo = _FakeDeviceInfo
+
+_aiohttp_mod = MagicMock()
+_aiohttp_mod.ClientError = _FakeClientError
 
 # `import homeassistant.util.dt as dt_util` resolves via attribute chain, not
 # sys.modules key lookup, so we must wire .dt on the parent mock explicitly.
@@ -111,7 +118,7 @@ sys.modules.update(
         "homeassistant.helpers.entity_platform": MagicMock(),
         "homeassistant.helpers.event": MagicMock(),
         "homeassistant.helpers.update_coordinator": _coordinator_mod,
-        "aiohttp": MagicMock(),
+        "aiohttp": _aiohttp_mod,
     }
 )
 

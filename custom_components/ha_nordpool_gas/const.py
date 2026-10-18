@@ -1,3 +1,5 @@
+from .eexgas import Hub
+
 DOMAIN = "ha_nordpool_gas"
 DEFAULT_VAT = 24.0
 DEFAULT_GAS_EXCISE = 0.0
@@ -5,13 +7,13 @@ DEFAULT_AREA = "ee"
 
 ELERING_URL = "https://dashboard.elering.ee/api/nps/price/csv"
 
-# EE and LV intentionally share the same URL — they trade on the same Baltic hub (LVA-EST)
+# EE and LV intentionally share the same hub — they trade on the same Baltic hub (LVA-EST)
 # and publish an identical gas price.
-GAS_URL_BY_AREA: dict[str, str] = {
-    "ee": "https://gasandregistry.eex.com/Gas/NGP/LVA-EST_NGP_15_Mins.csv",
-    "lv": "https://gasandregistry.eex.com/Gas/NGP/LVA-EST_NGP_15_Mins.csv",
-    "fi": "https://gasandregistry.eex.com/Gas/NGP/FIN_NGP_15_Mins.csv",
-    "lt": "https://gasandregistry.eex.com/Gas/NGP/LTU_NGP_15_Mins.csv",
+GAS_HUB_BY_AREA: dict[str, Hub] = {
+    "ee": Hub.LVA_EST,
+    "lv": Hub.LVA_EST,
+    "fi": Hub.FIN,
+    "lt": Hub.LTU,
 }
 
 # Transfer fee modes

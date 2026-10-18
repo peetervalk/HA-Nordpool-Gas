@@ -31,10 +31,11 @@ from custom_components.ha_nordpool_gas.sensor import (
     _current_slot_price,
     _make_transfer_fn,
     _parse_electricity_csv,
-    _parse_gas_csv,
     _retained_electricity_rows,
     _rows_to_list,
+    _select_gas_prices,
 )
+from custom_components.ha_nordpool_gas.eexgas import GasDayPrice
 
 TALLINN = ZoneInfo("Europe/Tallinn")
 
@@ -52,12 +53,9 @@ def _elec_csv(*rows: tuple[int, float]) -> str:
     return "\n".join(lines)
 
 
-def _gas_csv(*rows: tuple[str, float]) -> str:
-    """Minimal EEX-style gas CSV: date string (dd/mm/yyyy), price."""
-    lines = ["Gasday;IndexValue (?/MWh);IndexVolume;Status;Timestamp"]
-    for date_str, price in rows:
-        lines.append(f"{date_str};{str(price).replace('.', ',')};1000;Final;2024-01-01T00:00:00")
-    return "\n".join(lines)
+def _gas_rows(*rows: tuple[date, float]) -> list[GasDayPrice]:
+    """EEX gas rows as the eexgas client returns them: gas day, price."""
+    return [GasDayPrice(gas_day, price, 1000.0, "Final NGP", None) for gas_day, price in rows]
 
 
 def _epoch(dt_aware: datetime) -> int:
@@ -179,46 +177,49 @@ def test_transfer_fn_day_night_weekend_not_forced():
 
 
 # ---------------------------------------------------------------------------
-# _parse_gas_csv
+# _select_gas_prices
 # ---------------------------------------------------------------------------
 
+GAS_TODAY = date(2024, 6, 15)
+GAS_TOMORROW = date(2024, 6, 16)
 
-def test_parse_gas_csv_today_and_tomorrow():
-    text = _gas_csv(("15/06/2024", 45.5), ("16/06/2024", 46.0))
-    today, tomorrow = _parse_gas_csv(text, "15/06/2024", "16/06/2024")
+
+def test_select_gas_prices_today_and_tomorrow():
+    rows = _gas_rows((GAS_TODAY, 45.5), (GAS_TOMORROW, 46.0))
+    today, tomorrow = _select_gas_prices(rows, GAS_TODAY, GAS_TOMORROW)
     assert today == 45.5
     assert tomorrow == 46.0
 
 
-def test_parse_gas_csv_zero_price_skipped():
+def test_select_gas_prices_zero_price_skipped():
     # First row is zero → skip; second row is the real price
-    text = _gas_csv(("15/06/2024", 0.0), ("15/06/2024", 45.5))
-    today, _ = _parse_gas_csv(text, "15/06/2024", "16/06/2024")
+    rows = _gas_rows((GAS_TODAY, 0.0), (GAS_TODAY, 45.5))
+    today, _ = _select_gas_prices(rows, GAS_TODAY, GAS_TOMORROW)
     assert today == 45.5
 
 
-def test_parse_gas_csv_tomorrow_absent():
-    text = _gas_csv(("15/06/2024", 45.5))
-    today, tomorrow = _parse_gas_csv(text, "15/06/2024", "16/06/2024")
-    assert today == 45.5
-    assert tomorrow is None
-
-
-def test_parse_gas_csv_first_nonzero_wins():
-    text = _gas_csv(("15/06/2024", 45.5), ("15/06/2024", 99.0))
-    today, _ = _parse_gas_csv(text, "15/06/2024", "16/06/2024")
-    assert today == 45.5
-
-
-def test_parse_gas_csv_irrelevant_dates_ignored():
-    text = _gas_csv(("13/06/2024", 40.0), ("15/06/2024", 45.5))
-    today, tomorrow = _parse_gas_csv(text, "15/06/2024", "16/06/2024")
+def test_select_gas_prices_tomorrow_absent():
+    rows = _gas_rows((GAS_TODAY, 45.5))
+    today, tomorrow = _select_gas_prices(rows, GAS_TODAY, GAS_TOMORROW)
     assert today == 45.5
     assert tomorrow is None
 
 
-def test_parse_gas_csv_empty_text():
-    today, tomorrow = _parse_gas_csv("", "15/06/2024", "16/06/2024")
+def test_select_gas_prices_first_nonzero_wins():
+    rows = _gas_rows((GAS_TODAY, 45.5), (GAS_TODAY, 99.0))
+    today, _ = _select_gas_prices(rows, GAS_TODAY, GAS_TOMORROW)
+    assert today == 45.5
+
+
+def test_select_gas_prices_irrelevant_dates_ignored():
+    rows = _gas_rows((date(2024, 6, 13), 40.0), (GAS_TODAY, 45.5))
+    today, tomorrow = _select_gas_prices(rows, GAS_TODAY, GAS_TOMORROW)
+    assert today == 45.5
+    assert tomorrow is None
+
+
+def test_select_gas_prices_no_rows():
+    today, tomorrow = _select_gas_prices([], GAS_TODAY, GAS_TOMORROW)
     assert today is None
     assert tomorrow is None
 

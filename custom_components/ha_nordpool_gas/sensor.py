@@ -40,11 +40,12 @@ from .const import (
     DEFAULT_VAT,
     DOMAIN,
     ELERING_URL,
-    GAS_URL_BY_AREA,
+    GAS_HUB_BY_AREA,
     TRANSFER_MODE_DAY_NIGHT,
     TRANSFER_MODE_FIXED,
     TRANSFER_MODE_NONE,
 )
+from .eexgas import EexGasClient, EexGasError, GasDayPrice
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -182,37 +183,23 @@ def _current_hour_average(rows: list[tuple[datetime, float]], now: datetime) -> 
     return round(sum(prices) / len(prices), 2) if prices else None
 
 
-def _parse_gas_csv(
-    text: str, today_str: str, tomorrow_str: str
+def _select_gas_prices(
+    prices: list[GasDayPrice], today: date, tomorrow: date
 ) -> tuple[float | None, float | None]:
-    """Parse EEX CSV and return (today_price, tomorrow_price) in EUR/MWh.
+    """Return (today_price, tomorrow_price) in EUR/MWh from EEX NGP rows.
 
-    Uses column index instead of column name to avoid encoding issues with the
-    euro sign in the header (EEX serves it as Windows-1252 0x80, not UTF-8).
-    Column layout: Gasday ; IndexValue (€/MWh) ; IndexVolume ; Status ; Timestamp
+    Rows are matched on their gas day. Zero prices are skipped, and when a gas day
+    appears more than once the first non-zero row wins.
     """
     today_price: float | None = None
     tomorrow_price: float | None = None
-    reader = csv.reader(io.StringIO(text), delimiter=";")
-    next(reader, None)  # skip header row
-    for row in reader:
-        if len(row) < 2:
+    for row in prices:
+        if row.price == 0:
             continue
-        row_date = row[0].strip()
-        if row_date not in (today_str, tomorrow_str):
-            continue
-        try:
-            price = float(row[1].strip().replace(",", "."))
-        except (ValueError, TypeError):
-            continue
-        if price == 0:
-            continue
-        if row_date == today_str and today_price is None:
-            today_price = price
-        elif row_date == tomorrow_str and tomorrow_price is None:
-            tomorrow_price = price
-        if today_price is not None and tomorrow_price is not None:
-            break
+        if row.gas_day == today and today_price is None:
+            today_price = row.price
+        elif row.gas_day == tomorrow and tomorrow_price is None:
+            tomorrow_price = row.price
     return today_price, tomorrow_price
 
 
@@ -273,42 +260,52 @@ async def async_setup_entry(
     area = config.get(CONF_AREA, DEFAULT_AREA)
     vat = float(config.get(CONF_VAT, DEFAULT_VAT))
     gas_excise = float(config.get(CONF_GAS_EXCISE, DEFAULT_GAS_EXCISE))
-    gas_url = GAS_URL_BY_AREA.get(area, GAS_URL_BY_AREA["ee"])
+    gas_hub = GAS_HUB_BY_AREA.get(area, GAS_HUB_BY_AREA["ee"])
     transfer_fn = _make_transfer_fn(config)
 
     session = async_get_clientsession(hass)
+    gas_client = EexGasClient(session)
+    gas_failing = False
 
-    async def _fetch(url: str, verify_ssl: bool = True) -> str:
+    async def _fetch(url: str) -> str:
         try:
-            timeout = aiohttp.ClientTimeout(total=30)
-            if verify_ssl:
-                resp = await session.get(url, timeout=timeout)
-            else:
-                resp = await session.get(url, timeout=timeout, ssl=False)
+            resp = await session.get(url, timeout=aiohttp.ClientTimeout(total=30))
             resp.raise_for_status()
             return await resp.text()
         except (aiohttp.ClientError, asyncio.TimeoutError) as err:
             _LOGGER.error("Error fetching %s: %s", url, err)
             return ""
 
+    async def _fetch_gas() -> list[GasDayPrice]:
+        """Fetch EEX rows, logging a failure once when it starts and once when it clears."""
+        nonlocal gas_failing
+        try:
+            prices = await gas_client.async_get_prices(gas_hub)
+        except EexGasError as err:
+            if gas_failing:
+                _LOGGER.debug("Gas price fetch still failing: %s", err)
+            else:
+                _LOGGER.warning("Gas price fetch failed, keeping the last known price: %s", err)
+            gas_failing = True
+            return []
+        if gas_failing:
+            _LOGGER.info("Gas price fetch recovered")
+            gas_failing = False
+        return prices
+
     async def _async_update_data():
         now = dt_util.now()
         now_naive = now.replace(tzinfo=None)
         today = now_naive.date()
         tomorrow = today + timedelta(days=1)
-        today_str = now_naive.strftime("%d/%m/%Y")
-        tomorrow_str = (now_naive + timedelta(days=1)).strftime("%d/%m/%Y")
 
         prev = coordinator.data or {}
 
         elering_url = _build_elering_url(ELERING_URL, area, today, tomorrow)
 
-        # EEX does not include the intermediate CA (GlobalSign GCC R3 DV TLS CA 2020)
-        # in their TLS handshake. The leaf cert is valid, but Python on Linux cannot
-        # build the chain without it. ssl=False is the only practical workaround.
-        electricity_text, gas_text = await asyncio.gather(
+        electricity_text, gas_prices = await asyncio.gather(
             _fetch(elering_url),
-            _fetch(gas_url, verify_ssl=False),
+            _fetch_gas(),
         )
 
         # --- Electricity ---
@@ -340,13 +337,7 @@ async def async_setup_entry(
         electricity_hourly = _current_hour_average(today_elec_rows, now)
 
         # --- Gas ---
-        if gas_text:
-            gas_today_raw, gas_tomorrow_raw = await hass.async_add_executor_job(
-                _parse_gas_csv, gas_text, today_str, tomorrow_str
-            )
-        else:
-            gas_today_raw = None
-            gas_tomorrow_raw = None
+        gas_today_raw, gas_tomorrow_raw = _select_gas_prices(gas_prices, today, tomorrow)
 
         def _to_gas_price(raw: float | None) -> float | None:
             if raw is None:
