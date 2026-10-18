@@ -43,7 +43,7 @@ from .const import (
     TRANSFER_MODE_FIXED,
     TRANSFER_MODE_NONE,
 )
-from .eexgas import EexGasClient, EexGasError, GasDayPrice
+from .eexgas import EexGasClient, EexGasError, GasDayPrice, Hub
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -67,14 +67,14 @@ SENSORS = (
 )
 
 
-def _delivery_dates(today: date) -> list[date]:
-    """Return the Nord Pool delivery days (CET dates) that overlap local today and tomorrow.
+def _delivery_dates(first_day: date, last_day: date) -> list[date]:
+    """Return the Nord Pool delivery days (CET dates) that overlap local days first_day..last_day.
 
-    For Baltic and Finnish local time that is yesterday, today and tomorrow, because
-    local midnight falls at 23:00 CET on the previous day.
+    In Baltic and Finnish local time, local midnight falls at 23:00 CET on the previous
+    day, so local today and tomorrow need yesterday's, today's and tomorrow's CET days.
     """
-    first = dt_util.start_of_local_day(today).astimezone(NORDPOOL_TZ).date()
-    window_end = dt_util.start_of_local_day(today + timedelta(days=2)) - timedelta(microseconds=1)
+    first = dt_util.start_of_local_day(first_day).astimezone(NORDPOOL_TZ).date()
+    window_end = dt_util.start_of_local_day(last_day + timedelta(days=1)) - timedelta(microseconds=1)
     last = window_end.astimezone(NORDPOOL_TZ).date()
     return [first + timedelta(days=offset) for offset in range((last - first).days + 1)]
 
@@ -173,24 +173,17 @@ def _current_hour_average(rows: list[tuple[datetime, float]], now: datetime) -> 
     return round(sum(prices) / len(prices), 2) if prices else None
 
 
-def _select_gas_prices(
-    prices: list[GasDayPrice], today: date, tomorrow: date
-) -> tuple[float | None, float | None]:
-    """Return (today_price, tomorrow_price) in EUR/MWh from EEX NGP rows.
+def _gas_prices_by_day(prices: list[GasDayPrice]) -> dict[date, float]:
+    """Return {gas_day: EUR/MWh} from EEX NGP rows.
 
-    Rows are matched on their gas day. Zero prices are skipped, and when a gas day
-    appears more than once the first non-zero row wins.
+    Zero prices are skipped: EEX lists the next gas day at 0 until it has been traded.
+    When a gas day appears more than once the first non-zero row wins.
     """
-    today_price: float | None = None
-    tomorrow_price: float | None = None
+    by_day: dict[date, float] = {}
     for row in prices:
-        if row.price == 0:
-            continue
-        if row.gas_day == today and today_price is None:
-            today_price = row.price
-        elif row.gas_day == tomorrow and tomorrow_price is None:
-            tomorrow_price = row.price
-    return today_price, tomorrow_price
+        if row.price != 0:
+            by_day.setdefault(row.gas_day, row.price)
+    return by_day
 
 
 def _rows_to_list(rows: list[tuple[datetime, float]]) -> list[list]:
@@ -262,6 +255,10 @@ class _ElectricityPrices:
                 self._log.success()
         return [entry for day in days for entry in self._days.get(day, [])]
 
+    def holds(self, days: list[date]) -> bool:
+        """Return whether prices, final or preliminary, are held for every one of these days."""
+        return all(self._days.get(day) for day in days)
+
     async def _async_fetch(self, day: date) -> Exception | None:
         """Fetch one delivery day into memory; return the error if the fetch failed."""
         try:
@@ -278,6 +275,40 @@ class _ElectricityPrices:
         if data.prices_final:
             self._final.add(day)
         return None
+
+
+class _GasPrices:
+    """EEX gas prices for one hub, remembered per gas day with the time each was fetched.
+
+    Each successful fetch refreshes every gas day the file has a price for. A failed
+    fetch, or a day the file does not price, keeps what was remembered. Prices are looked
+    up by gas day, so at local midnight tomorrow's price becomes today's and is never
+    shown for the day after. Days before today are dropped.
+    """
+
+    def __init__(self, client: EexGasClient, hub: Hub) -> None:
+        self._client = client
+        self._hub = hub
+        self._days: dict[date, tuple[float, int]] = {}  # gas day -> (EUR/MWh, fetched at)
+        self._log = _FetchLog("Gas price")
+
+    async def async_update(self, today: date, now_ts: int) -> None:
+        """Fetch the hub's file and remember its prices for today onwards."""
+        for day in [day for day in self._days if day < today]:
+            del self._days[day]
+        try:
+            rows = await self._client.async_get_prices(self._hub)
+        except EexGasError as err:
+            self._log.failure(err)
+            return
+        self._log.success()
+        for day, price in _gas_prices_by_day(rows).items():
+            if day >= today:
+                self._days[day] = (price, now_ts)
+
+    def get(self, day: date) -> tuple[float, int] | None:
+        """Return (EUR/MWh, fetched at in epoch seconds) for a gas day, or None if unknown."""
+        return self._days.get(day)
 
 
 def _build_gas_series(
@@ -315,17 +346,7 @@ async def async_setup_entry(
 
     session = async_get_clientsession(hass)
     electricity = _ElectricityPrices(NordPoolClient(session), area.upper())
-    gas_client = EexGasClient(session)
-    gas_log = _FetchLog("Gas price")
-
-    async def _fetch_gas() -> list[GasDayPrice]:
-        try:
-            prices = await gas_client.async_get_prices(gas_hub)
-        except EexGasError as err:
-            gas_log.failure(err)
-            return []
-        gas_log.success()
-        return prices
+    gas = _GasPrices(EexGasClient(session), gas_hub)
 
     async def _async_update_data():
         now = dt_util.now()
@@ -333,11 +354,9 @@ async def async_setup_entry(
         today = now_naive.date()
         tomorrow = today + timedelta(days=1)
 
-        prev = coordinator.data or {}
-
-        electricity_entries, gas_prices = await asyncio.gather(
-            electricity.async_entries(_delivery_dates(today)),
-            _fetch_gas(),
+        electricity_entries, _ = await asyncio.gather(
+            electricity.async_entries(_delivery_dates(today, tomorrow)),
+            gas.async_update(today, int(now.timestamp())),
         )
 
         # --- Electricity ---
@@ -354,25 +373,14 @@ async def async_setup_entry(
         electricity_hourly = _current_hour_average(today_elec_rows, now)
 
         # --- Gas ---
-        gas_today_raw, gas_tomorrow_raw = _select_gas_prices(gas_prices, today, tomorrow)
-
-        def _to_gas_price(raw: float | None) -> float | None:
-            if raw is None:
-                return None
+        def _to_gas_price(raw: float) -> float:
             return round((raw + gas_excise) * (100 + vat) / 100, 2)
 
-        gas_now_fresh = _to_gas_price(gas_today_raw)
-        if gas_now_fresh is not None:
-            gas_now = gas_now_fresh
-            gas_fresh_at = int(now.timestamp())
-        else:
-            _LOGGER.debug("Gas today price unavailable; retaining previous value")
-            gas_now = prev.get("gas_now")
-            gas_fresh_at = prev.get("gas_fresh_at")
-
-        gas_tomorrow = _to_gas_price(gas_tomorrow_raw)
-        if gas_tomorrow is None:
-            gas_tomorrow = prev.get("gas_tomorrow")
+        gas_today = gas.get(today)
+        gas_next = gas.get(tomorrow)
+        gas_now = _to_gas_price(gas_today[0]) if gas_today else None
+        gas_fresh_at = gas_today[1] if gas_today else None
+        gas_tomorrow = _to_gas_price(gas_next[0]) if gas_next else None
 
         return {
             "electricity_15min": electricity_15min,
@@ -387,7 +395,7 @@ async def async_setup_entry(
             "hourly_tomorrow": hourly_tomorrow,
             "hourly_rows_today": _build_hourly_rows(today_elec_rows),
             "hourly_rows_tomorrow": _build_hourly_rows(tomorrow_elec_rows),
-            "tomorrow_valid": len(tomorrow_elec_rows) > 0,
+            "tomorrow_valid": electricity.holds(_delivery_dates(tomorrow, tomorrow)),
             "updated_at": int(now.timestamp()),
         }
 

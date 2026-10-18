@@ -28,6 +28,8 @@ Three sensor entities are created per configured integration entry:
 
 All prices include VAT and any configured network transfer fees.
 
+`tomorrow_valid` turns true once Nord Pool has published tomorrow's electricity prices, usually around 13:00 CET. Before that, `electricity_rows_tomorrow` already holds tomorrow's first hour, because local midnight in the Baltics and Finland falls at 23:00 CET on the previous day, inside a delivery day that is already published. `gas_tomorrow` is empty until EEX has a price for tomorrow's gas day.
+
 Hourly electricity prices come in two shapes. `hourly_today` and `hourly_tomorrow` map the hour number (0–23) to its price, which is convenient for looking up a given hour. `hourly_rows_today` and `hourly_rows_tomorrow` list `[epoch_seconds, price]` rows, one per clock hour at the start of that hour, which suits charts. On the days the clocks change, the row lists hold 23 or 25 rows. The hour-number maps have no entry for the skipped hour in spring, and in autumn their entry for the repeated hour is the average of both passes.
 
 The Gas Price sensor's `gas_series` attribute lists `[epoch_seconds, price]` rows at local midnight today, tomorrow and the day after (tomorrow uses `gas_tomorrow`, or today's price until that is published), so step charts can draw gas across a fixed 48h window ending tomorrow 24:00.

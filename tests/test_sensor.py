@@ -37,11 +37,12 @@ from custom_components.ha_nordpool_gas.sensor import (
     _delivery_dates,
     _describe_error,
     _ElectricityPrices,
+    _gas_prices_by_day,
+    _GasPrices,
     _make_transfer_fn,
     _rows_to_list,
-    _select_gas_prices,
 )
-from custom_components.ha_nordpool_gas.eexgas import GasDayPrice
+from custom_components.ha_nordpool_gas.eexgas import EexGasConnectionError, GasDayPrice, Hub
 
 TALLINN = ZoneInfo("Europe/Tallinn")
 
@@ -81,20 +82,30 @@ def _epoch(dt_aware: datetime) -> int:
 )
 def test_delivery_dates_tallinn_spans_yesterday_to_tomorrow(today):
     """Local midnight in Tallinn is 23:00 CET the day before, so yesterday's CET day is needed."""
-    assert _delivery_dates(today) == [today - timedelta(days=1), today, today + timedelta(days=1)]
+    tomorrow = today + timedelta(days=1)
+    assert _delivery_dates(today, tomorrow) == [today - timedelta(days=1), today, tomorrow]
+
+
+def test_delivery_dates_for_tallinn_tomorrow_alone_are_today_and_tomorrow():
+    """Local tomorrow's first hour is the last hour of today's CET day."""
+    today = date(2026, 10, 19)
+    tomorrow = today + timedelta(days=1)
+    assert _delivery_dates(tomorrow, tomorrow) == [today, tomorrow]
 
 
 def test_delivery_dates_west_of_cet_spans_today_to_day_after_tomorrow():
     """In London local tomorrow ends at 01:00 CET the day after, which needs that CET day too."""
     dt_util.set_default_time_zone(ZoneInfo("Europe/London"))
     today = date(2026, 10, 19)
-    assert _delivery_dates(today) == [today, today + timedelta(days=1), today + timedelta(days=2)]
+    tomorrow = today + timedelta(days=1)
+    assert _delivery_dates(today, tomorrow) == [today, tomorrow, today + timedelta(days=2)]
 
 
 def test_delivery_dates_in_cet_are_today_and_tomorrow():
     dt_util.set_default_time_zone(ZoneInfo("Europe/Oslo"))
     today = date(2026, 10, 19)
-    assert _delivery_dates(today) == [today, today + timedelta(days=1)]
+    tomorrow = today + timedelta(days=1)
+    assert _delivery_dates(today, tomorrow) == [today, tomorrow]
 
 
 # ---------------------------------------------------------------------------
@@ -181,51 +192,135 @@ def test_transfer_fn_day_night_weekend_not_forced():
 
 
 # ---------------------------------------------------------------------------
-# _select_gas_prices
+# _gas_prices_by_day
 # ---------------------------------------------------------------------------
 
+GAS_YESTERDAY = date(2024, 6, 14)
 GAS_TODAY = date(2024, 6, 15)
 GAS_TOMORROW = date(2024, 6, 16)
+GAS_DAY_AFTER = date(2024, 6, 17)
 
 
-def test_select_gas_prices_today_and_tomorrow():
+def test_gas_prices_by_day_today_and_tomorrow():
     rows = _gas_rows((GAS_TODAY, 45.5), (GAS_TOMORROW, 46.0))
-    today, tomorrow = _select_gas_prices(rows, GAS_TODAY, GAS_TOMORROW)
-    assert today == 45.5
-    assert tomorrow == 46.0
+    assert _gas_prices_by_day(rows) == {GAS_TODAY: 45.5, GAS_TOMORROW: 46.0}
 
 
-def test_select_gas_prices_zero_price_skipped():
-    # First row is zero → skip; second row is the real price
-    rows = _gas_rows((GAS_TODAY, 0.0), (GAS_TODAY, 45.5))
-    today, _ = _select_gas_prices(rows, GAS_TODAY, GAS_TOMORROW)
-    assert today == 45.5
+def test_gas_prices_by_day_zero_price_skipped():
+    # EEX lists the next gas day at 0 until it has been traded
+    rows = _gas_rows((GAS_TODAY, 0.0), (GAS_TODAY, 45.5), (GAS_TOMORROW, 0.0))
+    assert _gas_prices_by_day(rows) == {GAS_TODAY: 45.5}
 
 
-def test_select_gas_prices_tomorrow_absent():
-    rows = _gas_rows((GAS_TODAY, 45.5))
-    today, tomorrow = _select_gas_prices(rows, GAS_TODAY, GAS_TOMORROW)
-    assert today == 45.5
-    assert tomorrow is None
-
-
-def test_select_gas_prices_first_nonzero_wins():
+def test_gas_prices_by_day_first_nonzero_wins():
     rows = _gas_rows((GAS_TODAY, 45.5), (GAS_TODAY, 99.0))
-    today, _ = _select_gas_prices(rows, GAS_TODAY, GAS_TOMORROW)
-    assert today == 45.5
+    assert _gas_prices_by_day(rows) == {GAS_TODAY: 45.5}
 
 
-def test_select_gas_prices_irrelevant_dates_ignored():
-    rows = _gas_rows((date(2024, 6, 13), 40.0), (GAS_TODAY, 45.5))
-    today, tomorrow = _select_gas_prices(rows, GAS_TODAY, GAS_TOMORROW)
-    assert today == 45.5
-    assert tomorrow is None
+def test_gas_prices_by_day_no_rows():
+    assert _gas_prices_by_day([]) == {}
 
 
-def test_select_gas_prices_no_rows():
-    today, tomorrow = _select_gas_prices([], GAS_TODAY, GAS_TOMORROW)
-    assert today is None
-    assert tomorrow is None
+# ---------------------------------------------------------------------------
+# _GasPrices
+# ---------------------------------------------------------------------------
+
+
+class _FakeGasClient:
+    """Answers async_get_prices with `result`: a list of rows, or an exception to raise."""
+
+    def __init__(self, result) -> None:
+        self.result = result
+
+    async def async_get_prices(self, hub):
+        if isinstance(self.result, BaseException):
+            raise self.result
+        return self.result
+
+
+def _gas_after_update(client: _FakeGasClient, today: date = GAS_TODAY, now_ts: int = 1000) -> _GasPrices:
+    gas = _GasPrices(client, Hub.LVA_EST)  # type: ignore[arg-type]
+    asyncio.run(gas.async_update(today, now_ts))
+    return gas
+
+
+def test_gas_prices_remembers_today_and_tomorrow_with_fetch_time():
+    client = _FakeGasClient(
+        _gas_rows((GAS_YESTERDAY, 40.0), (GAS_TODAY, 45.5), (GAS_TOMORROW, 46.0), (GAS_DAY_AFTER, 0.0))
+    )
+    gas = _gas_after_update(client)
+
+    assert gas.get(GAS_TODAY) == (45.5, 1000)
+    assert gas.get(GAS_TOMORROW) == (46.0, 1000)
+    assert gas.get(GAS_DAY_AFTER) is None
+    assert gas.get(GAS_YESTERDAY) is None
+
+
+def test_gas_prices_failed_fetch_keeps_prices_and_their_fetch_time():
+    client = _FakeGasClient(_gas_rows((GAS_TODAY, 45.5), (GAS_TOMORROW, 46.0)))
+    gas = _gas_after_update(client)
+
+    client.result = EexGasConnectionError("Connection reset by peer")
+    asyncio.run(gas.async_update(GAS_TODAY, 1900))
+
+    assert gas.get(GAS_TODAY) == (45.5, 1000)
+    assert gas.get(GAS_TOMORROW) == (46.0, 1000)
+
+
+def test_gas_prices_successful_fetch_refreshes_price_and_fetch_time():
+    client = _FakeGasClient(_gas_rows((GAS_TODAY, 45.5)))
+    gas = _gas_after_update(client)
+
+    client.result = _gas_rows((GAS_TODAY, 45.7))
+    asyncio.run(gas.async_update(GAS_TODAY, 1900))
+
+    assert gas.get(GAS_TODAY) == (45.7, 1900)
+
+
+def test_gas_prices_tomorrow_becomes_today_at_midnight_even_if_the_fetch_fails():
+    client = _FakeGasClient(_gas_rows((GAS_TODAY, 45.5), (GAS_TOMORROW, 46.0)))
+    gas = _gas_after_update(client)
+
+    client.result = EexGasConnectionError("Connection reset by peer")
+    asyncio.run(gas.async_update(GAS_TOMORROW, 2000))
+
+    assert gas.get(GAS_TOMORROW) == (46.0, 1000)
+    assert gas.get(GAS_TODAY) is None  # yesterday by now
+    assert gas.get(GAS_DAY_AFTER) is None
+
+
+def test_gas_prices_tomorrow_is_not_carried_to_the_next_day():
+    """After midnight the new tomorrow is a zero placeholder: it must stay unknown."""
+    client = _FakeGasClient(_gas_rows((GAS_TODAY, 45.5), (GAS_TOMORROW, 46.0)))
+    gas = _gas_after_update(client)
+
+    client.result = _gas_rows((GAS_TODAY, 45.6), (GAS_TOMORROW, 46.2), (GAS_DAY_AFTER, 0.0))
+    asyncio.run(gas.async_update(GAS_TOMORROW, 2000))
+
+    assert gas.get(GAS_TOMORROW) == (46.2, 2000)
+    assert gas.get(GAS_DAY_AFTER) is None
+
+
+def test_gas_prices_day_missing_from_a_later_file_keeps_its_remembered_price():
+    client = _FakeGasClient(_gas_rows((GAS_TODAY, 45.5), (GAS_TOMORROW, 46.0)))
+    gas = _gas_after_update(client)
+
+    client.result = _gas_rows((GAS_TODAY, 45.6), (GAS_TOMORROW, 0.0))
+    asyncio.run(gas.async_update(GAS_TODAY, 1900))
+
+    assert gas.get(GAS_TODAY) == (45.6, 1900)
+    assert gas.get(GAS_TOMORROW) == (46.0, 1000)
+
+
+def test_gas_prices_logs_a_failure_once(caplog):
+    caplog.set_level(logging.DEBUG, logger=SENSOR_LOGGER)
+    gas = _gas_after_update(_FakeGasClient(EexGasConnectionError("Connection reset by peer")))
+    asyncio.run(gas.async_update(GAS_TODAY, 1900))
+
+    assert [(r.levelno, r.getMessage()) for r in caplog.records if r.name == SENSOR_LOGGER] == [
+        (logging.WARNING, "Gas price fetch failed, keeping the last known prices: Connection reset by peer"),
+        (logging.DEBUG, "Gas price fetch still failing: Connection reset by peer"),
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -661,6 +756,66 @@ def test_electricity_prices_after_midnight_held_days_carry_over_and_old_days_dro
     client.requested.clear()
     _get_prices(electricity, [D17])
     assert client.requested == [D17]
+
+
+def test_electricity_prices_holds_fetched_days_final_or_preliminary():
+    client = _FakeNordPoolClient({D19: _period(D19, [4.0]), D20: _period(D20, [5.0], final=False)})
+    electricity = _ElectricityPrices(client, AREA)
+    _get_prices(electricity, [D19, D20])
+
+    assert electricity.holds([D19, D20])
+
+
+def test_electricity_prices_does_not_hold_unpublished_or_empty_days():
+    """tomorrow_valid stays false until Nord Pool has published tomorrow's CET day."""
+    client = _FakeNordPoolClient({D19: _period(D19, [4.0]), D20: _period(D20, [5.0], area="FI")})
+    electricity = _ElectricityPrices(client, AREA)
+    _get_prices(electricity, [D18, D19, D20])
+
+    assert electricity.holds([D19])
+    assert not electricity.holds([D19, D20])  # D20 has no prices for this area
+    assert not electricity.holds([D18])  # D18 is unpublished
+
+
+def _cet_day(day: date, price: float) -> SimpleNamespace:
+    """A whole published CET delivery day at 15-min resolution: 92, 96 or 100 entries."""
+    start = datetime.combine(day, time(), tzinfo=CET).astimezone(timezone.utc)
+    end = datetime.combine(day + timedelta(days=1), time(), tzinfo=CET).astimezone(timezone.utc)
+    count = (end - start) // timedelta(minutes=15)
+    entries = [SimpleNamespace(start=start + timedelta(minutes=15 * i), entry={AREA: price}) for i in range(count)]
+    return SimpleNamespace(entries=entries, prices_final=True)
+
+
+@pytest.mark.parametrize(
+    ("today", "today_slots", "tomorrow_slots"),
+    [
+        (date(2026, 10, 24), 96, 100),  # tomorrow is the 25-hour day
+        (date(2026, 10, 25), 100, 96),  # clocks go back at 04:00 EEST
+        (date(2026, 3, 28), 96, 92),  # tomorrow is the 23-hour day
+        (date(2026, 3, 29), 92, 96),  # clocks go forward at 03:00 EET
+    ],
+)
+def test_clock_change_days_get_every_local_slot_and_tomorrow_valid(today, today_slots, tomorrow_slots):
+    tomorrow = today + timedelta(days=1)
+    days = _delivery_dates(today, tomorrow)
+    client = _FakeNordPoolClient({day: _cet_day(day, float(day.day)) for day in days})
+    electricity = _ElectricityPrices(client, AREA)
+    no_transfer = _make_transfer_fn({CONF_TRANSFER_MODE: TRANSFER_MODE_NONE})
+
+    entries = asyncio.run(electricity.async_entries(days))
+    today_rows, tomorrow_rows = _apply_electricity_fees(entries, 0.0, no_transfer, today, tomorrow)
+
+    assert len(today_rows) == today_slots
+    assert len(tomorrow_rows) == tomorrow_slots
+    assert today_rows[0][0] == dt_util.start_of_local_day(today)
+    assert tomorrow_rows[-1][0] + timedelta(minutes=15) == dt_util.start_of_local_day(tomorrow + timedelta(days=1))
+    assert electricity.holds(_delivery_dates(tomorrow, tomorrow))
+
+    # Before Nord Pool publishes tomorrow's CET day, tomorrow is not valid
+    del client.results[days[-1]]
+    unpublished = _ElectricityPrices(client, AREA)
+    asyncio.run(unpublished.async_entries(days))
+    assert not unpublished.holds(_delivery_dates(tomorrow, tomorrow))
 
 
 def test_electricity_prices_ignores_entries_for_other_areas():
