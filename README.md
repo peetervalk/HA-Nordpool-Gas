@@ -5,7 +5,7 @@ Fetches electricity and gas spot prices and exposes them as Home Assistant senso
 **Electricity** day-ahead prices come from the [Nord Pool data portal](https://data.nordpoolgroup.com/auction/day-ahead/prices) at 15-minute resolution, through [pynordpool](https://github.com/gjohansson-ST/pynordpool), the library Home Assistant's built-in Nord Pool integration uses.
 **Gas** is fetched from the [EEX NGP daily CSV](https://www.eex.com/en/market-data/market-data-hub/natural-gas/indices) — the correct file is selected automatically based on the configured region.
 
-Sensors refresh at **:00, :15, :30 and :45** each hour. Gas prices are fetched on every refresh, because EEX updates them during the day. Electricity prices are fetched for each day until Nord Pool has published final prices for it, then reused; tomorrow's prices are usually published around 13:00 CET.
+Electricity sensors switch to the new price exactly at **:00, :15, :30 and :45** each hour, from prices already fetched. Gas prices are fetched within a minute after each of those times, because EEX updates them during the day. Electricity prices for a day are fetched from 12:00 CET the day before, when Nord Pool's day-ahead auction closes, until Nord Pool has published final prices for it, then reused; tomorrow's prices are usually published around 13:00 CET. Those fetches run 1–4 minutes before each quarter-hour, ahead of the many clients that ask Nord Pool on the hour.
 
 ## Supported regions
 
@@ -97,7 +97,7 @@ Open **Settings → Devices & Services**, find the Nordpool & EEX Spot Prices en
 
 ### `ha_nordpool_gas.refresh`
 
-Forces an immediate data fetch for all Nordpool & EEX Spot Prices instances, bypassing the normal 15-minute schedule. Useful after a connectivity issue or for automations that need an up-to-date value on demand.
+Forces an immediate fetch of gas prices, and of any electricity prices still missing, for all Nordpool & EEX Spot Prices instances, bypassing the normal schedule. Useful after a connectivity issue or for automations that need an up-to-date value on demand.
 
 ```yaml
 action: ha_nordpool_gas.refresh

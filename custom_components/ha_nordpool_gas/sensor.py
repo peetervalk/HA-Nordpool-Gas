@@ -48,6 +48,7 @@ from .eexgas import EexGasClient, EexGasError, GasDayPrice, Hub
 _LOGGER = logging.getLogger(__name__)
 
 GAS_STALE_SECONDS = 3600
+QUARTER_MINUTES = [0, 15, 30, 45]
 
 # Nord Pool delivery days are CET/CEST dates, the same zone core's nordpool integration uses.
 NORDPOOL_TZ = dt_util.get_time_zone("Europe/Oslo")
@@ -77,6 +78,15 @@ def _delivery_dates(first_day: date, last_day: date) -> list[date]:
     window_end = dt_util.start_of_local_day(last_day + timedelta(days=1)) - timedelta(microseconds=1)
     last = window_end.astimezone(NORDPOOL_TZ).date()
     return [first + timedelta(days=offset) for offset in range((last - first).days + 1)]
+
+
+def _auction_close(day: date) -> datetime:
+    """Return when Nord Pool's day-ahead auction for delivery day `day` closes: 12:00 CET the day before.
+
+    No prices for the day exist before then, whatever the local time zone.
+    """
+    eve = day - timedelta(days=1)
+    return datetime(eve.year, eve.month, eve.day, 12, tzinfo=NORDPOOL_TZ)
 
 
 def _make_transfer_fn(config: dict) -> Callable[[datetime], float]:
@@ -195,11 +205,14 @@ def _describe_error(err: BaseException) -> str:
     """Return err's message, or its cause's when it has none.
 
     pynordpool raises a bare NordPoolError from the last error once its retries run out.
+    Without any message the type name is returned, skipping the CancelledError that
+    aiohttp chains under the bare TimeoutError of a timed-out request.
     """
     if str(err):
         return str(err)
-    if err.__cause__ is not None:
-        return _describe_error(err.__cause__)
+    cause = err.__cause__
+    if cause is not None and (str(cause) or not isinstance(cause, asyncio.CancelledError)):
+        return _describe_error(cause)
     return type(err).__name__
 
 
@@ -228,10 +241,11 @@ class _FetchLog:
 class _ElectricityPrices:
     """Nord Pool day-ahead prices for one area, held per delivery day (CET date).
 
-    A delivery day is fetched on every update until Nord Pool has published final
-    prices for it, and is served from memory after that. Days no longer asked for are
-    dropped. A failed fetch keeps the days already held, and because local rows are
-    rebuilt from them on every update, they stay correct across local midnight.
+    A delivery day is due for fetching from the close of its auction until Nord Pool
+    has published final prices for it, and is served from memory after that. Days no
+    longer asked for are dropped. A failed fetch keeps the days already held, and
+    because local rows are rebuilt from them on every update, they stay correct across
+    local midnight.
     """
 
     def __init__(self, client: NordPoolClient, area: str) -> None:
@@ -241,18 +255,24 @@ class _ElectricityPrices:
         self._final: set[date] = set()
         self._log = _FetchLog("Electricity price")
 
-    async def async_entries(self, days: list[date]) -> list[tuple[datetime, float]]:
-        """Return (start, EUR/MWh) entries for the given delivery days, in day order."""
+    async def async_update(self, days: list[date], now: datetime) -> bool:
+        """Drop days not in `days`, fetch the ones due at `now`, and return whether the held prices changed."""
         for day in [day for day in self._days if day not in days]:
             del self._days[day]
             self._final.discard(day)
-        to_fetch = [day for day in days if day not in self._final]
-        if to_fetch:
-            errors = [err for err in await asyncio.gather(*map(self._async_fetch, to_fetch)) if err]
-            if errors:
-                self._log.failure(errors[0])
-            else:
-                self._log.success()
+        to_fetch = [day for day in days if day not in self._final and now >= _auction_close(day)]
+        if not to_fetch:
+            return False
+        held = dict(self._days)
+        errors = [err for err in await asyncio.gather(*map(self._async_fetch, to_fetch)) if err]
+        if errors:
+            self._log.failure(errors[0])
+        else:
+            self._log.success()
+        return self._days != held
+
+    def entries(self, days: list[date]) -> list[tuple[datetime, float]]:
+        """Return the (start, EUR/MWh) entries held for the given delivery days, in day order."""
         return [entry for day in days for entry in self._days.get(day, [])]
 
     def holds(self, days: list[date]) -> bool:
@@ -348,20 +368,14 @@ async def async_setup_entry(
     electricity = _ElectricityPrices(NordPoolClient(session), area.upper())
     gas = _GasPrices(EexGasClient(session), gas_hub)
 
-    async def _async_update_data():
+    async def _async_update_electricity():
+        """Build the electricity sensors' data from the prices held, without fetching."""
         now = dt_util.now()
-        now_naive = now.replace(tzinfo=None)
-        today = now_naive.date()
+        today = now.date()
         tomorrow = today + timedelta(days=1)
 
-        electricity_entries, _ = await asyncio.gather(
-            electricity.async_entries(_delivery_dates(today, tomorrow)),
-            gas.async_update(today, int(now.timestamp())),
-        )
-
-        # --- Electricity ---
         today_elec_rows, tomorrow_elec_rows = _apply_electricity_fees(
-            electricity_entries, vat, transfer_fn, today, tomorrow
+            electricity.entries(_delivery_dates(today, tomorrow)), vat, transfer_fn, today, tomorrow
         )
 
         hourly_today, hourly_tomorrow = await asyncio.gather(
@@ -369,26 +383,9 @@ async def async_setup_entry(
             hass.async_add_executor_job(_build_hourly_averages, tomorrow_elec_rows),
         )
 
-        electricity_15min = _current_slot_price(today_elec_rows, now)
-        electricity_hourly = _current_hour_average(today_elec_rows, now)
-
-        # --- Gas ---
-        def _to_gas_price(raw: float) -> float:
-            return round((raw + gas_excise) * (100 + vat) / 100, 2)
-
-        gas_today = gas.get(today)
-        gas_next = gas.get(tomorrow)
-        gas_now = _to_gas_price(gas_today[0]) if gas_today else None
-        gas_fresh_at = gas_today[1] if gas_today else None
-        gas_tomorrow = _to_gas_price(gas_next[0]) if gas_next else None
-
         return {
-            "electricity_15min": electricity_15min,
-            "electricity_hourly": electricity_hourly,
-            "gas_now": gas_now,
-            "gas_tomorrow": gas_tomorrow,
-            "gas_series": _build_gas_series(gas_now, gas_tomorrow, today),
-            "gas_fresh_at": gas_fresh_at,
+            "electricity_15min": _current_slot_price(today_elec_rows, now),
+            "electricity_hourly": _current_hour_average(today_elec_rows, now),
             "electricity_rows_today": _rows_to_list(today_elec_rows),
             "electricity_rows_tomorrow": _rows_to_list(tomorrow_elec_rows),
             "hourly_today": hourly_today,
@@ -399,42 +396,115 @@ async def async_setup_entry(
             "updated_at": int(now.timestamp()),
         }
 
-    coordinator = DataUpdateCoordinator(
+    async def _async_update_gas():
+        """Fetch the EEX gas prices and build the gas sensor's data."""
+        now = dt_util.now()
+        today = now.date()
+        tomorrow = today + timedelta(days=1)
+
+        await gas.async_update(today, int(now.timestamp()))
+
+        def _to_gas_price(raw: float) -> float:
+            return round((raw + gas_excise) * (100 + vat) / 100, 2)
+
+        gas_today = gas.get(today)
+        gas_next = gas.get(tomorrow)
+        gas_now = _to_gas_price(gas_today[0]) if gas_today else None
+        gas_fresh_at = gas_today[1] if gas_today else None
+        gas_tomorrow = _to_gas_price(gas_next[0]) if gas_next else None
+
+        return {
+            "gas_now": gas_now,
+            "gas_tomorrow": gas_tomorrow,
+            "gas_series": _build_gas_series(gas_now, gas_tomorrow, today),
+            "gas_fresh_at": gas_fresh_at,
+            "updated_at": int(now.timestamp()),
+        }
+
+    electricity_coordinator = DataUpdateCoordinator(
         hass,
         logger=_LOGGER,
-        name=f"{DOMAIN}_{entry.entry_id}",
+        name=f"{DOMAIN}_{entry.entry_id}_electricity",
         update_interval=None,
-        update_method=_async_update_data,
+        update_method=_async_update_electricity,
+    )
+    gas_coordinator = DataUpdateCoordinator(
+        hass,
+        logger=_LOGGER,
+        name=f"{DOMAIN}_{entry.entry_id}_gas",
+        update_interval=None,
+        update_method=_async_update_gas,
     )
 
-    async def _handle_time_update(_now=None):
-        await coordinator.async_request_refresh()
+    async def _async_fetch_electricity() -> bool:
+        """Fetch the Nord Pool days due now; return whether the prices held changed."""
+        now = dt_util.now()
+        today = now.date()
+        try:
+            return await electricity.async_update(_delivery_dates(today, today + timedelta(days=1)), now)
+        except Exception:  # Runs outside the coordinator, which used to catch this; setup must not fail on it.
+            _LOGGER.exception("Unexpected error fetching electricity prices")
+            return False
 
-    jitter_second = random.randint(5, 59)
-    cancel_quarterly = async_track_time_change(
-        hass, _handle_time_update, minute=[0, 15, 30, 45], second=jitter_second
-    )
+    async def _async_refresh() -> None:
+        """Fetch whatever is due now and rebuild every sensor's data."""
+        await asyncio.gather(_async_fetch_electricity(), gas_coordinator.async_refresh())
+        await electricity_coordinator.async_refresh()
+
+    async def _handle_quarter(_now=None):
+        # A new 15-min slot has started: switch to its price from the prices held.
+        await electricity_coordinator.async_refresh()
+
+    async def _handle_electricity_fetch(_now=None):
+        if await _async_fetch_electricity():
+            await electricity_coordinator.async_refresh()
+
+    async def _handle_gas_update(_now=None):
+        await gas_coordinator.async_request_refresh()
+
+    # Nord Pool is fetched 1-4 minutes before each quarter-hour, ahead of the clients
+    # that all ask it on the hour, and gas 5-59 seconds after each quarter-hour.
+    fetch_at = random.randint(11 * 60, 14 * 60)  # seconds into the quarter
+    gas_second = random.randint(5, 59)
+    for cancel in (
+        async_track_time_change(hass, _handle_quarter, minute=QUARTER_MINUTES, second=0),
+        async_track_time_change(
+            hass,
+            _handle_electricity_fetch,
+            minute=[minute + fetch_at // 60 for minute in QUARTER_MINUTES],
+            second=fetch_at % 60,
+        ),
+        async_track_time_change(hass, _handle_gas_update, minute=QUARTER_MINUTES, second=gas_second),
+    ):
+        entry.async_on_unload(cancel)
 
     hass.data.setdefault(DOMAIN, {})
-    hass.data[DOMAIN][entry.entry_id] = coordinator
+    hass.data[DOMAIN][entry.entry_id] = _async_refresh
     @callback
     def _cleanup_entry_data() -> None:
         # Must not return a value: HA schedules any truthy return as a task.
         hass.data.get(DOMAIN, {}).pop(entry.entry_id, None)
 
-    entry.async_on_unload(cancel_quarterly)
     entry.async_on_unload(_cleanup_entry_data)
 
     if not hass.services.has_service(DOMAIN, "refresh"):
         async def _handle_refresh_service(call):
-            for coord in hass.data[DOMAIN].values():
-                await coord.async_request_refresh()
+            for refresh in hass.data[DOMAIN].values():
+                await refresh()
         hass.services.async_register(DOMAIN, "refresh", _handle_refresh_service)
 
-    await coordinator.async_refresh()
+    await _async_refresh()
 
     async_add_entities(
-        [SpotPriceSensor(coordinator, entry.entry_id, entry.title, description) for description in SENSORS]
+        [
+            SpotPriceSensor(
+                gas_coordinator if description.key == "gas_now" else electricity_coordinator,
+                entry.entry_id,
+                entry.title,
+                description,
+            )
+            for description in SENSORS
+        ]
     )
 
 

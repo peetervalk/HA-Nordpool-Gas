@@ -637,6 +637,7 @@ AREA = "EE"
 CET = ZoneInfo("Europe/Oslo")
 D17, D18, D19, D20 = (date(2026, 10, day) for day in (17, 18, 19, 20))
 SENSOR_LOGGER = "custom_components.ha_nordpool_gas.sensor"
+NOW = datetime(2026, 10, 19, 14, 0, tzinfo=CET)  # D20's auction has closed, so every test day is due
 
 
 def _period(day: date, prices: list[float], final: bool = True, area: str = AREA) -> SimpleNamespace:
@@ -668,8 +669,9 @@ class _FakeNordPoolClient:
         return result
 
 
-def _get_prices(electricity: _ElectricityPrices, days: list[date]) -> list[float]:
-    return [price for _, price in asyncio.run(electricity.async_entries(days))]
+def _get_prices(electricity: _ElectricityPrices, days: list[date], now: datetime = NOW) -> list[float]:
+    asyncio.run(electricity.async_update(days, now))
+    return [price for _, price in electricity.entries(days)]
 
 
 def test_electricity_prices_fetches_every_day_and_returns_entries_in_day_order():
@@ -686,7 +688,8 @@ def test_electricity_prices_entries_start_at_utc_instants():
     client = _FakeNordPoolClient({D19: _period(D19, [4.0])})
     electricity = _ElectricityPrices(client, AREA)
 
-    ((start, _),) = asyncio.run(electricity.async_entries([D19]))
+    asyncio.run(electricity.async_update([D19], NOW))
+    ((start, _),) = electricity.entries([D19])
 
     assert start == datetime(2026, 10, 18, 22, 0, tzinfo=timezone.utc)  # 00:00 CEST
 
@@ -724,6 +727,37 @@ def test_electricity_prices_unpublished_day_is_asked_again_without_logging(caplo
     assert _get_prices(electricity, [D19, D20]) == [4.0]
     assert client.requested == [D20]
     assert [r for r in caplog.records if r.name == SENSOR_LOGGER] == []
+
+
+def test_electricity_prices_day_is_not_asked_before_its_auction_closes():
+    """D20's prices cannot exist before 12:00 CEST on D19, which is 13:00 in Tallinn."""
+    client = _FakeNordPoolClient({D19: _period(D19, [4.0])})
+    electricity = _ElectricityPrices(client, AREA)
+
+    _get_prices(electricity, [D19, D20], now=datetime(2026, 10, 19, 12, 59, 59, tzinfo=TALLINN))
+    assert client.requested == [D19]
+
+    client.requested.clear()
+    _get_prices(electricity, [D19, D20], now=datetime(2026, 10, 19, 13, 0, tzinfo=TALLINN))
+    assert client.requested == [D20]
+
+
+def test_electricity_prices_update_reports_whether_held_prices_changed():
+    client = _FakeNordPoolClient({D19: _period(D19, [4.0], final=False)})
+    electricity = _ElectricityPrices(client, AREA)
+
+    assert asyncio.run(electricity.async_update([D19, D20], NOW))  # D19 arrives
+    assert not asyncio.run(electricity.async_update([D19, D20], NOW))  # D19 unchanged, D20 unpublished
+
+    client.results[D19] = _period(D19, [4.5])
+    assert asyncio.run(electricity.async_update([D19, D20], NOW))  # D19 turns final with new prices
+
+    client.results[D20] = NordPoolError()
+    assert not asyncio.run(electricity.async_update([D19, D20], NOW))  # a failed fetch changes nothing
+
+    client.requested.clear()
+    assert not asyncio.run(electricity.async_update([D19], NOW))
+    assert client.requested == []  # D19 is final: nothing is due
 
 
 @pytest.mark.parametrize(
@@ -802,7 +836,9 @@ def test_clock_change_days_get_every_local_slot_and_tomorrow_valid(today, today_
     electricity = _ElectricityPrices(client, AREA)
     no_transfer = _make_transfer_fn({CONF_TRANSFER_MODE: TRANSFER_MODE_NONE})
 
-    entries = asyncio.run(electricity.async_entries(days))
+    now = datetime.combine(today, time(13), tzinfo=CET)  # tomorrow's auction has closed
+    asyncio.run(electricity.async_update(days, now))
+    entries = electricity.entries(days)
     today_rows, tomorrow_rows = _apply_electricity_fees(entries, 0.0, no_transfer, today, tomorrow)
 
     assert len(today_rows) == today_slots
@@ -814,7 +850,7 @@ def test_clock_change_days_get_every_local_slot_and_tomorrow_valid(today, today_
     # Before Nord Pool publishes tomorrow's CET day, tomorrow is not valid
     del client.results[days[-1]]
     unpublished = _ElectricityPrices(client, AREA)
-    asyncio.run(unpublished.async_entries(days))
+    asyncio.run(unpublished.async_update(days, now))
     assert not unpublished.holds(_delivery_dates(tomorrow, tomorrow))
 
 
@@ -860,6 +896,17 @@ def test_describe_error_falls_back_to_the_cause():
 
 def test_describe_error_falls_back_to_the_type_name():
     assert _describe_error(TimeoutError()) == "TimeoutError"
+
+
+def test_describe_error_names_a_timeout_rather_than_its_cancelled_request():
+    """aiohttp raises a bare TimeoutError from the CancelledError of the timed-out request."""
+    timeout = TimeoutError()
+    timeout.__cause__ = asyncio.CancelledError()
+    assert _describe_error(timeout) == "TimeoutError"
+
+    wrapped = NordPoolError()
+    wrapped.__cause__ = timeout
+    assert _describe_error(wrapped) == "TimeoutError"
 
 
 # ---------------------------------------------------------------------------
