@@ -1,6 +1,9 @@
 {
   "domain": "ha_nordpool_gas",
   "name": "Nordpool & EEX Spot Prices",
+  "categories": [
+    "energy.energy_prices"
+  ],
   "codeowners": [
     "@peetervalk"
   ],
@@ -14,5 +17,5 @@
   "requirements": [
     "pynordpool>=0.4.0"
   ],
-  "version": "0.3.0"
+  "version": "0.3.1"
 }
